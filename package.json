@@ -13,7 +13,7 @@
     "crypto-js": "^4.2.0",
     "dotenv": "^17.4.2",
     "firebase": "^12.18.0",
-    "firebase-admin": "^14.3.0",
+    "firebase-admin": "^13.4.0",
     "lucide-react": "^1.33.0",
     "mqtt": "^5.15.2",
     "next": "16.3.1",
