@@ -1,0 +1,2200 @@
+"use client";
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
+import Link from "next/link";
+
+import {
+  ArrowLeft,
+  Clock3,
+  Power,
+  Activity,
+  Zap,
+  Gauge,
+  Plus,
+  Receipt,
+} from "lucide-react";
+
+import Sidebar from "@/components/layout/Sidebar";
+import Header from "@/components/layout/Header";
+
+import { auth } from "@/lib/firebase";
+import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import {
+  completeShutdownMode,
+  convertPreparingToBilling,
+  endPreparingWithoutBilling,
+  getActivePreparingSession,
+  getActiveShutdownSession,
+  getPreparingRisk,
+  getShutdownElapsedMinutes,
+  startPreparingSession,
+  startShutdownMode,
+  type PreparingSession,
+  type ShutdownSession,
+} from "@/lib/preparing";
+
+/* =========================================================
+   PACKAGES
+========================================================= */
+
+const PACKAGES = [
+  {
+    id: "1h",
+    name: "1 Jam",
+    durationMinutes: 60,
+    price: 12000,
+    saving: 0,
+  },
+  {
+    id: "2h",
+    name: "2 Jam",
+    durationMinutes: 120,
+    price: 22000,
+    saving: 2000,
+  },
+  {
+    id: "3h",
+    name: "3 Jam",
+    durationMinutes: 180,
+    price: 30000,
+    saving: 6000,
+  },
+  {
+    id: "5h",
+    name: "5 Jam",
+    durationMinutes: 300,
+    price: 45000,
+    saving: 15000,
+  },
+  {
+    id: "10h",
+    name: "10 Jam",
+    durationMinutes: 600,
+    price: 80000,
+    saving: 40000,
+  },
+];
+
+/* =========================================================
+   TYPES
+========================================================= */
+
+type DeviceState = {
+  switch: boolean;
+  countdown: number;
+  power: number;
+  current: number;
+  voltage: number;
+};
+
+type SessionPackage = {
+  id: string;
+  name: string;
+  durationMinutes: number;
+  durationSeconds?: number;
+  price: number;
+  type?: "INITIAL" | "ADD_TIME";
+  addedAt: string | null;
+};
+
+type Session = {
+  id: string;
+  deviceId: string;
+  status: "ACTIVE" | "COMPLETED";
+  startedAt: string | null;
+  endedAt: string | null;
+  totalMinutes: number;
+  totalPrice: number;
+};
+
+/* =========================================================
+   PAGE
+========================================================= */
+
+export default function PSDetailPage({
+  params,
+}: {
+  params: Promise<{
+    deviceId: string;
+  }>;
+}) {
+  const preferences = useDashboardPreferences();
+
+  /* =======================================================
+     BASIC STATE
+  ======================================================= */
+
+  const [collapsed, setCollapsed] = useState(false);
+
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  const [rawDeviceId, setRawDeviceId] = useState("");
+
+  const [deviceState, setDeviceState] = useState<DeviceState | null>(null);
+
+  const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
+
+  const [liveCountdown, setLiveCountdown] = useState(0);
+
+  const [loading, setLoading] = useState(true);
+
+  const [controlLoading, setControlLoading] = useState(false);
+
+  const [error, setError] = useState<string | null>(null);
+
+  /* =======================================================
+     SESSION
+  ======================================================= */
+
+  const [session, setSession] = useState<Session | null>(null);
+
+  const [sessionPackages, setSessionPackages] = useState<SessionPackage[]>([]);
+
+  const [restoringSession, setRestoringSession] = useState(true);
+
+  const [completingSession, setCompletingSession] = useState(false);
+
+  const [preparing, setPreparing] = useState<PreparingSession | null>(null);
+
+  const [shutdownMode, setShutdownMode] = useState<ShutdownSession | null>(
+    null,
+  );
+
+  const [lastCompletedSessionId, setLastCompletedSessionId] = useState<
+    string | null
+  >(null);
+
+  const [preparingNow, setPreparingNow] = useState(0);
+
+  /* =======================================================
+     REFS
+  ======================================================= */
+
+  const sessionRef = useRef<Session | null>(null);
+
+  const completingRef = useRef(false);
+
+  const expiryStopRef = useRef(false);
+
+  const countdownRef = useRef(0);
+
+  const lastTuyaSyncRef = useRef<number>(0);
+
+  const handleExpiredSessionRef = useRef<(sessionId: string) => void>(() => {});
+
+  /* =======================================================
+     SYNC SESSION REF
+  ======================================================= */
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  /* =======================================================
+     GET DEVICE ID
+  ======================================================= */
+
+  useEffect(() => {
+    let mounted = true;
+
+    params.then((value) => {
+      if (mounted) {
+        setRawDeviceId(value.deviceId);
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [params]);
+
+  const [notification, setNotification] = useState<{
+    type: "success" | "error" | "warning";
+    message: string;
+  } | null>(null);
+
+  function showNotification(
+    type: "success" | "error" | "warning",
+    message: string,
+  ) {
+    setNotification({
+      type,
+      message,
+    });
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 4000);
+  }
+  /* =======================================================
+     RESTORE ACTIVE SESSION
+  ======================================================= */
+
+  const restoreActiveSession = useCallback(async (deviceId: string) => {
+    try {
+      setRestoringSession(true);
+
+      console.log("=================================");
+      console.log("🔥 RESTORE ACTIVE SESSION");
+      console.log("DEVICE:", deviceId);
+      console.log("=================================");
+
+      /*
+       * Firebase Authentication
+       *
+       * Endpoint session juga nantinya membutuhkan
+       * authentication.
+       */
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      const response = await fetch(
+        `/api/sessions/active?deviceId=${encodeURIComponent(deviceId)}`,
+        {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+        },
+      );
+
+      const data = await response.json();
+
+      console.log("ACTIVE SESSION RESPONSE:", data);
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Gagal mengambil active session");
+      }
+
+      if (!data.active || !data.session) {
+        sessionRef.current = null;
+        setSession(null);
+        setSessionPackages([]);
+        countdownRef.current = 0;
+        setLiveCountdown(0);
+        console.log("Tidak ada active session");
+        return;
+      }
+
+      const restoredSession = data.session as Session;
+
+      const restoredPackages = (data.packages ?? []) as SessionPackage[];
+
+      sessionRef.current = restoredSession;
+
+      expiryStopRef.current = false;
+
+      setSession(restoredSession);
+
+      setSessionPackages(restoredPackages);
+
+      const firebaseCountdown = calculateSessionCountdown(restoredSession);
+      countdownRef.current = firebaseCountdown;
+      setLiveCountdown(firebaseCountdown);
+
+      console.log("🔥 SESSION RESTORED:", restoredSession.id);
+
+      console.log("PACKAGES:", restoredPackages);
+    } catch (error) {
+      console.error("RESTORE SESSION ERROR:", error);
+
+      setError(
+        error instanceof Error ? error.message : "Gagal restore session",
+      );
+    } finally {
+      setRestoringSession(false);
+    }
+  }, []);
+
+  /* =======================================================
+     FETCH TUYA
+  ======================================================= */
+
+  const fetchDeviceState = useCallback(async (deviceId: string) => {
+    try {
+      /*
+       * ===================================================
+       * FIREBASE AUTH
+       * ===================================================
+       */
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      /*
+       * Ambil Firebase ID Token
+       */
+
+      const idToken = await user.getIdToken();
+
+      /*
+       * ===================================================
+       * REQUEST TUYA API
+       * ===================================================
+       */
+
+      const response = await fetch(`/api/tuya/device/${deviceId}`, {
+        cache: "no-store",
+
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+
+      const data = await response.json();
+
+      console.log("TUYA DEVICE RESPONSE:", data);
+
+      if (!response.ok || !data.success) {
+        const message = String(data.error ?? "Gagal mengambil status device");
+
+        if (
+          message.toLowerCase().includes("offline") ||
+          message.includes("40000801")
+        ) {
+          setDeviceOnline(false);
+          setDeviceState(null);
+          if (!sessionRef.current) {
+            countdownRef.current = 0;
+            setLiveCountdown(0);
+          }
+          setError(null);
+
+          return;
+        }
+
+        throw new Error(message);
+      }
+
+      if (data.online === false || !data.state) {
+        setDeviceOnline(false);
+        setDeviceState(null);
+        if (!sessionRef.current) {
+          countdownRef.current = 0;
+          setLiveCountdown(0);
+        }
+        setError(null);
+
+        return;
+      }
+
+      setDeviceOnline(true);
+
+      const state = data.state as DeviceState;
+
+      setDeviceState(state);
+
+      const activeSession = sessionRef.current;
+
+      const countdown = activeSession
+        ? calculateSessionCountdown(activeSession)
+        : Math.max(0, Number(state.countdown ?? 0));
+
+      countdownRef.current = countdown;
+      setLiveCountdown(countdown);
+
+      lastTuyaSyncRef.current = Date.now();
+
+      setError(null);
+    } catch (error) {
+      console.error("FETCH DEVICE ERROR:", error);
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Gagal mengambil status device",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /* =======================================================
+     RESTORE + INITIAL TUYA
+  ======================================================= */
+
+  useEffect(() => {
+    if (!rawDeviceId) {
+      return;
+    }
+
+    const initialize = async () => {
+      await restoreActiveSession(rawDeviceId);
+
+      await fetchDeviceState(rawDeviceId);
+    };
+
+    initialize();
+  }, [rawDeviceId, restoreActiveSession, fetchDeviceState]);
+
+  /* =======================================================
+     RESTORE PREPARING SESSION
+  ======================================================= */
+
+  useEffect(() => {
+    if (!rawDeviceId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    getActivePreparingSession(rawDeviceId)
+      .then((activePreparing) => {
+        if (!cancelled) {
+          setPreparing(activePreparing);
+        }
+      })
+      .catch((error) => {
+        console.error("RESTORE PREPARING ERROR:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rawDeviceId]);
+
+  /* =======================================================
+     RESTORE SHUTDOWN MODE
+  ======================================================= */
+
+  useEffect(() => {
+    if (!rawDeviceId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    getActiveShutdownSession(rawDeviceId)
+      .then((activeShutdown) => {
+        if (!cancelled) {
+          setShutdownMode(activeShutdown);
+        }
+      })
+      .catch((error) => {
+        console.error("RESTORE SHUTDOWN ERROR:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rawDeviceId]);
+
+  /* =======================================================
+     PREPARING CLOCK
+  ======================================================= */
+
+  useEffect(() => {
+    const updatePreparingNow = () => {
+      setPreparingNow(Date.now());
+    };
+
+    const timeout = setTimeout(updatePreparingNow, 0);
+    const interval = setInterval(updatePreparingNow, 30_000);
+
+    return () => {
+      clearTimeout(timeout);
+      clearInterval(interval);
+    };
+  }, []);
+
+  /* =======================================================
+     TUYA POLLING
+  ======================================================= */
+
+  useEffect(() => {
+    if (!rawDeviceId || !preferences.autoRefresh) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      fetchDeviceState(rawDeviceId);
+    }, preferences.refreshInterval * 1000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [
+    rawDeviceId,
+    fetchDeviceState,
+    preferences.autoRefresh,
+    preferences.refreshInterval,
+  ]);
+
+  /* =======================================================
+     SESSION EXPIRED
+
+     Firebase adalah source of truth untuk waktu rental.
+     Saat countdown Firebase mencapai 0:
+     1. Kirim STOP ke BARDI/Tuya sebagai pengaman.
+     2. Complete session Firebase.
+  ======================================================= */
+
+  async function handleExpiredSession(sessionId: string) {
+    if (expiryStopRef.current || completingRef.current) {
+      return;
+    }
+
+    expiryStopRef.current = true;
+
+    try {
+      console.log("=================================");
+      console.log("⏰ FIREBASE TIMER HABIS");
+      console.log("STOP BARDI + COMPLETE SESSION");
+      console.log("SESSION:", sessionId);
+      console.log("=================================");
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      /*
+       * Best-effort STOP ke BARDI/Tuya.
+       * Session tetap ditutup berdasarkan waktu Firebase meskipun
+       * device sedang offline atau Tuya gagal merespons.
+       */
+      try {
+        const stopResponse = await fetch("/api/tuya/control", {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            deviceId: rawDeviceId,
+            action: "STOP",
+          }),
+        });
+
+        const stopData = await stopResponse.json();
+
+        if (!stopResponse.ok || !stopData.success) {
+          const stopMessage = String(
+            stopData.error ?? stopData.message ?? "Gagal mematikan BARDI",
+          );
+
+          const offline =
+            stopMessage.toLowerCase().includes("offline") ||
+            stopMessage.includes("40000801");
+
+          if (offline) {
+            setDeviceOnline(false);
+            setDeviceState(null);
+
+            showNotification(
+              "warning",
+              "Waktu rental habis. Session ditutup, tetapi BARDI sedang offline.",
+            );
+          } else {
+            console.error("AUTO STOP TUYA ERROR:", stopMessage);
+
+            showNotification(
+              "warning",
+              "Waktu rental habis. Session akan ditutup, tetapi konfirmasi STOP BARDI gagal.",
+            );
+          }
+        } else {
+          setDeviceState((current) =>
+            current
+              ? {
+                  ...current,
+                  switch: false,
+                  countdown: 0,
+                }
+              : current,
+          );
+        }
+      } catch (stopError) {
+        console.error("AUTO STOP TUYA ERROR:", stopError);
+
+        showNotification(
+          "warning",
+          "Waktu rental habis. Session ditutup, tetapi STOP BARDI tidak dapat dikonfirmasi.",
+        );
+      }
+
+      await completeSession(sessionId);
+
+      showNotification("success", "Waktu rental habis. Session telah selesai.");
+    } catch (error) {
+      console.error("SESSION EXPIRY ERROR:", error);
+
+      expiryStopRef.current = false;
+
+      showNotification(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "Gagal menyelesaikan session yang habis",
+      );
+    }
+  }
+
+  useEffect(() => {
+    handleExpiredSessionRef.current = (sessionId: string) => {
+      void handleExpiredSession(sessionId);
+    };
+  });
+
+  /* =======================================================
+     LOCAL COUNTDOWN
+  ======================================================= */
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const activeSession = sessionRef.current;
+
+      if (activeSession?.status === "ACTIVE") {
+        const remaining = calculateSessionCountdown(activeSession);
+
+        countdownRef.current = remaining;
+        setLiveCountdown(remaining);
+
+        if (remaining <= 0 && !expiryStopRef.current) {
+          handleExpiredSessionRef.current(activeSession.id);
+        }
+
+        return;
+      }
+
+      if (!deviceState?.switch) {
+        return;
+      }
+
+      if (countdownRef.current <= 0) {
+        return;
+      }
+
+      countdownRef.current = Math.max(0, countdownRef.current - 1);
+      setLiveCountdown(countdownRef.current);
+    }, 1000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [deviceState?.switch]);
+
+  /* =======================================================
+     COMPLETE SESSION
+  ======================================================= */
+
+  async function completeSession(sessionId: string) {
+    if (completingRef.current) {
+      return;
+    }
+
+    completingRef.current = true;
+
+    setCompletingSession(true);
+
+    try {
+      console.log("🔥 COMPLETE SESSION:", sessionId);
+
+      /*
+       * Firebase Authentication
+       */
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      const response = await fetch(`/api/sessions/${sessionId}/complete`, {
+        method: "PATCH",
+
+        cache: "no-store",
+
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Gagal complete session");
+      }
+
+      /*
+       * Reset frontend
+       */
+
+      setLastCompletedSessionId(sessionId);
+
+      sessionRef.current = null;
+
+      expiryStopRef.current = false;
+
+      setSession(null);
+
+      setSessionPackages([]);
+
+      setLiveCountdown(0);
+
+      countdownRef.current = 0;
+
+      console.log("🔥 SESSION COMPLETED:", sessionId);
+    } catch (error) {
+      console.error("COMPLETE SESSION ERROR:", error);
+
+      setError(
+        error instanceof Error ? error.message : "Gagal complete session",
+      );
+    } finally {
+      completingRef.current = false;
+
+      setCompletingSession(false);
+    }
+  }
+
+  /* =======================================================
+     CREATE SESSION
+  ======================================================= */
+
+  async function createSession(pkg: (typeof PACKAGES)[number]) {
+    const user = auth.currentUser;
+
+    if (!user) {
+      throw new Error("User belum login");
+    }
+
+    const idToken = await user.getIdToken();
+
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+
+        Authorization: `Bearer ${idToken}`,
+      },
+
+      body: JSON.stringify({
+        deviceId: rawDeviceId,
+
+        durationSeconds: pkg.durationMinutes * 60,
+
+        durationMinutes: pkg.durationMinutes,
+
+        packageName: pkg.name,
+
+        price: pkg.price,
+      }),
+
+      cache: "no-store",
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Gagal membuat session");
+    }
+
+    return data.sessionId as string;
+  }
+
+  /* =======================================================
+     ADD PACKAGE FIREBASE
+  ======================================================= */
+
+  async function addPackageToFirebase(
+    sessionId: string,
+    pkg: (typeof PACKAGES)[number],
+  ) {
+    const user = auth.currentUser;
+
+    if (!user) {
+      throw new Error("User belum login");
+    }
+
+    const idToken = await user.getIdToken();
+
+    const response = await fetch(`/api/sessions/${sessionId}/packages`, {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+
+        Authorization: `Bearer ${idToken}`,
+      },
+
+      body: JSON.stringify({
+        name: pkg.name,
+
+        durationMinutes: pkg.durationMinutes,
+
+        durationSeconds: pkg.durationMinutes * 60,
+
+        price: pkg.price,
+      }),
+
+      cache: "no-store",
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Gagal menyimpan package");
+    }
+
+    return data;
+  }
+
+  /* =======================================================
+     SHUTDOWN MODE CONTROL
+  ======================================================= */
+
+  async function startOperationalShutdownMode() {
+    if (!rawDeviceId) {
+      return;
+    }
+
+    try {
+      setControlLoading(true);
+      setError(null);
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      /*
+       * Nyalakan monitor secara eksplisit untuk shutdown.
+       * Tidak membuat PREPARING dan tidak membuat billing.
+       */
+
+      const response = await fetch("/api/tuya/control", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          deviceId: rawDeviceId,
+          action: "ON",
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.error || "Gagal menyalakan monitor untuk shutdown",
+        );
+      }
+
+      const createdShutdown = await startShutdownMode(
+        rawDeviceId,
+        lastCompletedSessionId,
+      );
+
+      setShutdownMode(createdShutdown);
+
+      setDeviceOnline(true);
+
+      setDeviceState((current) =>
+        current
+          ? {
+              ...current,
+              switch: true,
+              countdown: 0,
+            }
+          : {
+              switch: true,
+              countdown: 0,
+              power: 0,
+              current: 0,
+              voltage: 0,
+            },
+      );
+
+      showNotification(
+        "success",
+        "Shutdown Mode aktif. Monitor dinyalakan untuk mematikan PS4 secara normal.",
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      await fetchDeviceState(rawDeviceId);
+    } catch (error) {
+      console.error("START SHUTDOWN MODE ERROR:", error);
+
+      setError(
+        error instanceof Error ? error.message : "Gagal memulai Shutdown Mode",
+      );
+    } finally {
+      setControlLoading(false);
+    }
+  }
+
+  async function finishOperationalShutdownMode() {
+    if (!rawDeviceId || !shutdownMode) {
+      return;
+    }
+
+    try {
+      setControlLoading(true);
+      setError(null);
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      /*
+       * Setelah PS4 benar-benar sudah shutdown,
+       * matikan kembali monitor.
+       */
+
+      const response = await fetch("/api/tuya/control", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          deviceId: rawDeviceId,
+          action: "STOP",
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Gagal mematikan monitor");
+      }
+
+      /*
+       * Audit shutdown ditutup hanya setelah
+       * monitor berhasil dimatikan.
+       */
+
+      await completeShutdownMode(shutdownMode.id);
+
+      setShutdownMode(null);
+
+      setDeviceState((current) =>
+        current
+          ? {
+              ...current,
+              switch: false,
+              countdown: 0,
+            }
+          : current,
+      );
+
+      setLiveCountdown(0);
+
+      countdownRef.current = 0;
+
+      showNotification(
+        "success",
+        "Shutdown selesai. Monitor telah dimatikan. Kabel power utama sekarang dapat dicabut.",
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      await fetchDeviceState(rawDeviceId);
+    } catch (error) {
+      console.error("FINISH SHUTDOWN MODE ERROR:", error);
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Gagal menyelesaikan Shutdown Mode",
+      );
+    } finally {
+      setControlLoading(false);
+    }
+  }
+
+  /* =======================================================
+     CONTROL DEVICE
+  ======================================================= */
+
+  async function controlDevice(
+    action: "ON" | "OFF" | "TIMER" | "ADD_TIME" | "STOP",
+    durationMinutes?: number,
+  ) {
+    if (!rawDeviceId) {
+      return;
+    }
+
+    if (isOffline) {
+      if (preferences.showOfflineWarning) {
+        showNotification(
+          "warning",
+          `${rawDeviceId.toUpperCase()} sedang offline. Cek listrik dan koneksi Wi-Fi BARDI Smart Plug.`,
+        );
+      }
+
+      return;
+    }
+
+    try {
+      setControlLoading(true);
+
+      setError(null);
+
+      const selectedPackage =
+        durationMinutes !== undefined
+          ? PACKAGES.find((pkg) => pkg.durationMinutes === durationMinutes)
+          : undefined;
+
+      /*
+       * ===================================================
+       * ADD TIME
+       * ===================================================
+       */
+
+      let currentCountdown = 0;
+
+      if (action === "ADD_TIME") {
+        const activeSession = sessionRef.current;
+
+        if (!activeSession) {
+          throw new Error("Tidak ada session aktif");
+        }
+
+        currentCountdown = calculateSessionCountdown(activeSession);
+      }
+
+      /*
+       * ===================================================
+       * TUYA CONTROL
+       * ===================================================
+       */
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      const response = await fetch("/api/tuya/control", {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+
+          Authorization: `Bearer ${idToken}`,
+        },
+
+        body: JSON.stringify({
+          deviceId: rawDeviceId,
+
+          action,
+
+          ...(durationMinutes !== undefined
+            ? {
+                durationMinutes,
+              }
+            : {}),
+
+          ...(action === "ADD_TIME"
+            ? {
+                currentCountdown,
+              }
+            : {}),
+        }),
+
+        cache: "no-store",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        const errorMessage = data.error || "Gagal mengontrol Tuya";
+
+        // Device offline → tampilkan notifikasi UI saja
+        if (
+          errorMessage.toLowerCase().includes("offline") ||
+          errorMessage.includes("40000801")
+        ) {
+          setDeviceOnline(false);
+          setDeviceState(null);
+          if (!sessionRef.current) {
+            countdownRef.current = 0;
+            setLiveCountdown(0);
+          }
+          setError(null);
+
+          if (preferences.showOfflineWarning) {
+            showNotification(
+              "warning",
+              `${rawDeviceId.toUpperCase()} sedang offline. Cek listrik dan koneksi Wi-Fi BARDI Smart Plug.`,
+            );
+          }
+
+          return;
+        }
+
+        throw new Error(errorMessage);
+      }
+
+      /*
+       * ===================================================
+       * POWER ON → PREPARING
+       * ===================================================
+       */
+
+      if (action === "ON" && !sessionRef.current && !shutdownMode) {
+        try {
+          const activePreparing = await getActivePreparingSession(rawDeviceId);
+
+          if (activePreparing) {
+            setPreparing(activePreparing);
+          } else {
+            const createdPreparing = await startPreparingSession(rawDeviceId);
+
+            setPreparing(createdPreparing);
+          }
+        } catch (preparingError) {
+          console.error("START PREPARING ERROR:", preparingError);
+
+          showNotification(
+            "warning",
+            "Monitor berhasil dinyalakan, tetapi audit PREPARING gagal dibuat.",
+          );
+        }
+      }
+
+      /*
+       * ===================================================
+       * TIMER / SESSION BARU
+       * ===================================================
+       */
+
+      if (action === "TIMER" && selectedPackage) {
+        /*
+         * Jangan membuat session
+         * kalau ternyata sudah ada.
+         */
+
+        if (sessionRef.current) {
+          throw new Error("Masih ada session aktif");
+        }
+
+        try {
+          const sessionId = await createSession(selectedPackage);
+
+          /*
+           * Ambil kembali session dari Firebase
+           */
+
+          await restoreActiveSession(rawDeviceId);
+
+          if (preparing) {
+            try {
+              await convertPreparingToBilling(preparing.id, sessionId);
+
+              setPreparing(null);
+            } catch (preparingError) {
+              console.error("CONVERT PREPARING ERROR:", preparingError);
+
+              showNotification(
+                "warning",
+                "Billing sudah dimulai, tetapi audit PREPARING gagal dikonversi.",
+              );
+            }
+          }
+
+          console.log("🔥 SESSION STARTED:", sessionId);
+        } catch (error) {
+          /*
+           * Firebase gagal setelah Tuya timer berhasil.
+           *
+           * Stop Tuya supaya tidak ada rental
+           * tanpa transaksi.
+           */
+
+          console.error("FIREBASE SESSION FAILED:", error);
+
+          try {
+            const currentUser = auth.currentUser;
+
+            if (currentUser) {
+              const currentToken = await currentUser.getIdToken();
+
+              await fetch("/api/tuya/control", {
+                method: "POST",
+
+                headers: {
+                  "Content-Type": "application/json",
+
+                  Authorization: `Bearer ${currentToken}`,
+                },
+
+                body: JSON.stringify({
+                  deviceId: rawDeviceId,
+
+                  action: "STOP",
+                }),
+              });
+            }
+          } catch {}
+
+          throw error;
+        }
+      }
+
+      /*
+       * ===================================================
+       * ADD TIME
+       * ===================================================
+       */
+
+      if (action === "ADD_TIME" && selectedPackage) {
+        const activeSession = sessionRef.current;
+
+        if (!activeSession) {
+          throw new Error("Tidak ada session aktif");
+        }
+
+        /*
+         * Simpan package ke Firebase
+         */
+
+        await addPackageToFirebase(activeSession.id, selectedPackage);
+
+        /*
+         * Reload session dari Firebase
+         */
+
+        await restoreActiveSession(rawDeviceId);
+
+        /*
+         * Sinkronkan countdown Tuya
+         */
+
+        await fetchDeviceState(rawDeviceId);
+      }
+
+      /*
+       * ===================================================
+       * MONITOR OFF TANPA BILLING
+       * ===================================================
+       */
+
+      if (
+        (action === "OFF" || action === "STOP") &&
+        !sessionRef.current &&
+        preparing
+      ) {
+        try {
+          await endPreparingWithoutBilling(preparing.id);
+
+          setPreparing(null);
+        } catch (preparingError) {
+          console.error("END PREPARING WITHOUT BILLING ERROR:", preparingError);
+        }
+      }
+
+      /*
+       * ===================================================
+       * STOP
+       * ===================================================
+       */
+
+      if (action === "STOP") {
+        const activeSession = sessionRef.current;
+
+        if (activeSession) {
+          await completeSession(activeSession.id);
+        }
+      }
+
+      /*
+       * ===================================================
+       * REFRESH TUYA
+       * ===================================================
+       */
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      await fetchDeviceState(rawDeviceId);
+    } catch (error) {
+      console.error("CONTROL DEVICE ERROR:", error);
+
+      setError(
+        error instanceof Error ? error.message : "Gagal mengontrol device",
+      );
+    } finally {
+      setControlLoading(false);
+    }
+  }
+
+  /* =======================================================
+     DERIVED STATE
+  ======================================================= */
+
+  const deviceId = rawDeviceId.toUpperCase();
+
+  const isOffline = deviceOnline === false;
+
+  const isOn = deviceOnline === true && deviceState?.switch === true;
+
+  const sessionActive = session?.status === "ACTIVE";
+
+  const totalBilling = session?.totalPrice ?? 0;
+
+  const totalMinutes = session?.totalMinutes ?? 0;
+
+  const deviceControlDisabled = controlLoading || loading || isOffline;
+
+  const preparingRisk = getPreparingRisk(
+    preparing?.startedAt ?? null,
+    preparingNow,
+  );
+
+  const shutdownElapsedMinutes = getShutdownElapsedMinutes(
+    shutdownMode?.startedAt ?? null,
+    preparingNow,
+  );
+
+  /* =======================================================
+     LOADING
+  ======================================================= */
+
+  if (!rawDeviceId) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="text-sm text-slate-500">Loading device...</div>
+      </div>
+    );
+  }
+
+  /* =======================================================
+     PAGE
+  ======================================================= */
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <Sidebar
+        collapsed={collapsed}
+        onToggle={() => setCollapsed((prev) => !prev)}
+        mobileOpen={mobileSidebarOpen}
+        onMobileClose={() => setMobileSidebarOpen(false)}
+      />
+
+      <main
+        className={`min-h-screen transition-all duration-300 ${
+          collapsed ? "lg:ml-20" : "lg:ml-64"
+        }`}
+      >
+        <Header
+          onMenuClick={() => {
+            setMobileSidebarOpen((prev) => !prev);
+          }}
+        />
+        {notification && (
+          <div className="fixed right-6 top-6 z-[9999] w-[360px]">
+            <div
+              className={`rounded-xl border p-4 shadow-lg ${
+                notification.type === "error"
+                  ? "border-red-200 bg-red-50"
+                  : notification.type === "warning"
+                    ? "border-amber-200 bg-amber-50"
+                    : "border-emerald-200 bg-emerald-50"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+                    notification.type === "error"
+                      ? "bg-red-100 text-red-600"
+                      : notification.type === "warning"
+                        ? "bg-amber-100 text-amber-600"
+                        : "bg-emerald-100 text-emerald-600"
+                  }`}
+                >
+                  {notification.type === "error"
+                    ? "!"
+                    : notification.type === "warning"
+                      ? "!"
+                      : "✓"}
+                </div>
+
+                <div>
+                  <p
+                    className={`text-sm font-semibold ${
+                      notification.type === "error"
+                        ? "text-red-800"
+                        : notification.type === "warning"
+                          ? "text-amber-800"
+                          : "text-emerald-800"
+                    }`}
+                  >
+                    {notification.type === "error"
+                      ? "Terjadi Kesalahan"
+                      : notification.type === "warning"
+                        ? "Perhatian"
+                        : "Berhasil"}
+                  </p>
+
+                  <p
+                    className={`mt-1 text-sm ${
+                      notification.type === "error"
+                        ? "text-red-600"
+                        : notification.type === "warning"
+                          ? "text-amber-600"
+                          : "text-emerald-600"
+                    }`}
+                  >
+                    {notification.message}
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => setNotification(null)}
+                  className="ml-auto text-slate-400 hover:text-slate-600"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="space-y-6 p-6">
+          {/* BACK */}
+
+          <Link
+            href="/realtime"
+            className="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-blue-600"
+          >
+            <ArrowLeft size={17} />
+            Back to Realtime
+          </Link>
+
+          {/* HEADER */}
+
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="flex items-center gap-3">
+                <h1 className="text-2xl font-bold text-slate-900">
+                  {deviceId}
+                </h1>
+
+                <span
+                  className={`flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                    isOffline
+                      ? "bg-amber-50 text-amber-600"
+                      : isOn
+                        ? "bg-emerald-50 text-emerald-600"
+                        : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      isOffline
+                        ? "bg-amber-500"
+                        : isOn
+                          ? "bg-emerald-500"
+                          : "bg-slate-400"
+                    }`}
+                  />
+
+                  {loading
+                    ? "LOADING"
+                    : isOffline
+                      ? "OFFLINE"
+                      : isOn
+                        ? "ON"
+                        : "OFF"}
+                </span>
+              </div>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Detailed monitoring and usage information
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <Activity size={15} />
+
+              {loading
+                ? "Checking device..."
+                : isOffline
+                  ? "Device offline"
+                  : error
+                    ? "Connection Error"
+                    : "Device connected"}
+            </div>
+          </div>
+
+          {/* ERROR */}
+
+          {error && (
+            <div className="flex items-start justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <div>
+                <p className="text-sm font-semibold text-amber-800">
+                  Device Offline
+                </p>
+
+                <p className="mt-1 text-sm text-amber-700">{error}</p>
+              </div>
+
+              <button
+                onClick={() => setError(null)}
+                className="text-xs font-medium text-amber-600 hover:text-amber-800"
+              >
+                Tutup
+              </button>
+            </div>
+          )}
+
+          {/* REALTIME CARDS */}
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <InfoCard
+              icon={<Power size={20} />}
+              title="Current Status"
+              value={
+                loading
+                  ? "LOADING"
+                  : isOffline
+                    ? "OFFLINE"
+                    : isOn
+                      ? "ON"
+                      : "OFF"
+              }
+              description="Current device state"
+            />
+
+            <InfoCard
+              icon={<Clock3 size={20} />}
+              title="Countdown"
+              value={formatCountdown(liveCountdown)}
+              description="Live Firebase session timer"
+            />
+
+            <InfoCard
+              icon={<Zap size={20} />}
+              title="Power"
+              value={`${formatNumber(deviceState?.power ?? 0)} W`}
+              description="Current power"
+            />
+
+            <InfoCard
+              icon={<Gauge size={20} />}
+              title="Voltage"
+              value={`${formatVoltage(deviceState?.voltage ?? 0)} V`}
+              description="Current voltage"
+            />
+          </div>
+
+          {/* SHUTDOWN MODE */}
+
+          {shutdownMode && (
+            <div className="rounded-xl border border-violet-200 bg-violet-50 p-5 shadow-sm">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-bold text-violet-700">
+                    SHUTDOWN MODE
+                  </p>
+
+                  <p className="mt-1 text-xs leading-5 text-violet-600">
+                    Monitor dinyalakan hanya untuk mematikan PS4 secara normal.
+                    Mode ini tidak masuk billing dan tidak dianggap PREPARING.
+                  </p>
+
+                  <p className="mt-2 text-xs font-semibold text-violet-700">
+                    Durasi shutdown: {shutdownElapsedMinutes} menit
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={finishOperationalShutdownMode}
+                  disabled={controlLoading || isOffline}
+                  className="shrink-0 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {controlLoading ? "Mematikan Monitor..." : "SELESAI SHUTDOWN"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* PREPARING AUDIT */}
+
+          {preparing && !sessionActive && (
+            <div
+              className={`rounded-xl border p-5 shadow-sm ${
+                preparingRisk.level === "SUSPICIOUS"
+                  ? "border-red-200 bg-red-50"
+                  : preparingRisk.level === "WARNING"
+                    ? "border-amber-200 bg-amber-50"
+                    : "border-blue-200 bg-blue-50"
+              }`}
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p
+                    className={`text-sm font-bold ${
+                      preparingRisk.level === "SUSPICIOUS"
+                        ? "text-red-700"
+                        : preparingRisk.level === "WARNING"
+                          ? "text-amber-700"
+                          : "text-blue-700"
+                    }`}
+                  >
+                    {preparingRisk.level === "SUSPICIOUS"
+                      ? "SUSPICIOUS PREPARING"
+                      : preparingRisk.level === "WARNING"
+                        ? "PREPARING WARNING"
+                        : "PREPARING"}
+                  </p>
+
+                  <p
+                    className={`mt-1 text-xs ${
+                      preparingRisk.level === "SUSPICIOUS"
+                        ? "text-red-600"
+                        : preparingRisk.level === "WARNING"
+                          ? "text-amber-600"
+                          : "text-blue-600"
+                    }`}
+                  >
+                    Monitor sudah ON selama {preparingRisk.elapsedMinutes} menit
+                    tanpa billing.
+                  </p>
+                </div>
+
+                <div className="text-left sm:text-right">
+                  <p className="text-xs font-medium text-slate-500">
+                    Batas warning
+                  </p>
+
+                  <p className="mt-1 text-sm font-bold text-slate-800">
+                    45 menit
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* RENTAL CONTROL */}
+
+          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-slate-900">
+              Rental Control
+            </h2>
+
+            <p className="mt-1 text-sm text-slate-500">
+              Control BARDI Smart Plug untuk sesi rental
+            </p>
+
+            <div className="mt-6 space-y-6">
+              {/* RESTORING */}
+
+              {restoringSession && (
+                <div className="rounded-xl bg-blue-50 p-5 text-sm text-blue-700">
+                  Mengecek session aktif...
+                </div>
+              )}
+
+              {/* OFFLINE */}
+
+              {!restoringSession &&
+                isOffline &&
+                preferences.showOfflineWarning && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
+                    <p className="text-sm font-semibold text-amber-800">
+                      DEVICE OFFLINE
+                    </p>
+
+                    <p className="mt-1 text-xs text-amber-700">
+                      {deviceId} tidak dapat dihubungi. Periksa listrik dan
+                      koneksi Wi-Fi BARDI Smart Plug.
+                    </p>
+                  </div>
+                )}
+
+              {/* OFF */}
+
+              {!restoringSession &&
+                !isOffline &&
+                !isOn &&
+                !sessionActive &&
+                !shutdownMode && (
+                  <div>
+                    <div className="mb-4 rounded-xl bg-slate-50 p-5">
+                      <p className="text-sm font-semibold text-slate-700">
+                        PS OFF
+                      </p>
+
+                      <p className="mt-1 text-xs text-slate-500">
+                        Nyalakan monitor untuk persiapan rental. Setelah siap,
+                        pilih paket untuk memulai billing.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => controlDevice("ON")}
+                      disabled={deviceControlDisabled}
+                      className="w-full rounded-xl bg-blue-600 px-5 py-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isOffline
+                        ? "DEVICE OFFLINE"
+                        : controlLoading
+                          ? "Turning On..."
+                          : "SIAPKAN RENTAL"}
+                    </button>
+                  </div>
+                )}
+
+              {/* SHUTDOWN MODE ENTRY */}
+
+              {!restoringSession &&
+                !isOffline &&
+                !isOn &&
+                !sessionActive &&
+                !preparing &&
+                !shutdownMode &&
+                lastCompletedSessionId && (
+                  <div className="rounded-xl border border-violet-200 bg-violet-50 p-5">
+                    <p className="text-sm font-semibold text-violet-700">
+                      Rental terakhir sudah selesai
+                    </p>
+
+                    <p className="mt-1 text-xs leading-5 text-violet-600">
+                      Jika operational perlu menyalakan monitor untuk shutdown
+                      PS4, gunakan tombol khusus di bawah. Aksi ini tidak
+                      membuat billing.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={startOperationalShutdownMode}
+                      disabled={controlLoading}
+                      className="mt-4 w-full rounded-xl bg-violet-600 px-5 py-4 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {controlLoading
+                        ? "Menyalakan Monitor..."
+                        : "SHUTDOWN MODE"}
+                    </button>
+                  </div>
+                )}
+
+              {/* ON NO SESSION */}
+
+              {!restoringSession && isOn && !sessionActive && !shutdownMode && (
+                <div>
+                  <div className="mb-4 rounded-xl bg-blue-50 p-5">
+                    <p className="text-sm font-semibold text-blue-700">
+                      PS SIAP DIGUNAKAN
+                    </p>
+
+                    <p className="mt-1 text-xs text-blue-600">
+                      Pilih paket untuk memulai sesi rental.
+                    </p>
+                  </div>
+
+                  <p className="mb-3 text-sm font-semibold text-slate-700">
+                    Pilih Paket
+                  </p>
+
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    {PACKAGES.map((pkg) => (
+                      <button
+                        key={pkg.id}
+                        onClick={() =>
+                          controlDevice("TIMER", pkg.durationMinutes)
+                        }
+                        disabled={deviceControlDisabled}
+                        className="rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        <p className="text-sm font-bold text-slate-900">
+                          {pkg.name}
+                        </p>
+
+                        <p className="mt-1 text-sm font-semibold text-blue-600">
+                          Rp
+                          {pkg.price.toLocaleString("id-ID")}
+                        </p>
+
+                        {pkg.saving > 0 && (
+                          <p className="mt-1 text-xs text-emerald-600">
+                            Hemat Rp
+                            {pkg.saving.toLocaleString("id-ID")}
+                          </p>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ACTIVE SESSION */}
+
+              {sessionActive && (
+                <>
+                  {/* RUNNING */}
+
+                  <div className="rounded-xl bg-emerald-50 p-5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wider text-emerald-600">
+                          {isOffline ? "PS OFFLINE" : "PS RUNNING"}
+                        </p>
+
+                        <p className="mt-2 text-3xl font-bold text-emerald-700">
+                          {formatCountdown(liveCountdown)}
+                        </p>
+
+                        <p className="mt-1 text-sm text-emerald-600">
+                          Remaining time
+                        </p>
+                      </div>
+
+                      <Power size={25} className="text-emerald-600" />
+                    </div>
+                  </div>
+
+                  {/* BILLING */}
+
+                  <div className="rounded-xl border border-blue-100 bg-blue-50 p-5">
+                    <div className="flex items-center gap-2">
+                      <Receipt size={18} className="text-blue-600" />
+
+                      <p className="text-sm font-semibold text-blue-700">
+                        Total Billing
+                      </p>
+                    </div>
+
+                    <p className="mt-2 text-3xl font-bold text-blue-800">
+                      Rp
+                      {totalBilling.toLocaleString("id-ID")}
+                    </p>
+
+                    <p className="mt-1 text-xs text-blue-600">
+                      Total waktu: {formatMinutes(totalMinutes)}
+                    </p>
+                  </div>
+
+                  {/* PACKAGE HISTORY */}
+
+                  <div className="rounded-xl border border-slate-200">
+                    <div className="border-b border-slate-100 px-5 py-4">
+                      <p className="text-sm font-semibold text-slate-700">
+                        Paket Sesi
+                      </p>
+                    </div>
+
+                    <div className="divide-y divide-slate-100">
+                      {sessionPackages.map((pkg, index) => (
+                        <div
+                          key={pkg.id}
+                          className="flex items-center justify-between px-5 py-4"
+                        >
+                          <div>
+                            <p className="text-sm font-medium text-slate-800">
+                              {index === 0 ? "Paket Awal" : "Tambah Waktu"} —{" "}
+                              {pkg.name}
+                            </p>
+
+                            <p className="mt-1 text-xs text-slate-400">
+                              {pkg.addedAt
+                                ? new Date(pkg.addedAt).toLocaleTimeString(
+                                    "id-ID",
+                                  )
+                                : "-"}
+                            </p>
+                          </div>
+
+                          <p className="text-sm font-semibold text-slate-700">
+                            Rp
+                            {pkg.price.toLocaleString("id-ID")}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* ADD TIME */}
+
+                  <div>
+                    <div className="mb-3 flex items-center gap-2">
+                      <Plus size={17} className="text-blue-600" />
+
+                      <p className="text-sm font-semibold text-slate-700">
+                        Tambah Waktu
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                      {PACKAGES.map((pkg) => (
+                        <button
+                          key={pkg.id}
+                          onClick={() =>
+                            controlDevice("ADD_TIME", pkg.durationMinutes)
+                          }
+                          disabled={deviceControlDisabled}
+                          className="rounded-xl border border-blue-200 bg-white p-4 text-left hover:border-blue-400 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <p className="text-sm font-bold text-slate-900">
+                            + {pkg.name}
+                          </p>
+
+                          <p className="mt-1 text-sm font-semibold text-blue-600">
+                            Rp
+                            {pkg.price.toLocaleString("id-ID")}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* STOP */}
+
+                  <button
+                    onClick={() => controlDevice("STOP")}
+                    disabled={deviceControlDisabled || completingSession}
+                    className="w-full rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-600 hover:bg-red-100 disabled:opacity-50"
+                  >
+                    {isOffline
+                      ? "DEVICE OFFLINE"
+                      : controlLoading || completingSession
+                        ? "Stopping..."
+                        : "STOP SESSION"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* DEVICE REALTIME */}
+
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 p-6">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Device Realtime
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Live data from BARDI Smart Plug through Tuya Cloud
+              </p>
+            </div>
+
+            <div className="grid gap-6 p-6 sm:grid-cols-2 lg:grid-cols-4">
+              <RealtimeValue
+                label="Switch"
+                value={isOffline ? "OFFLINE" : isOn ? "ON" : "OFF"}
+              />
+
+              <RealtimeValue
+                label="Countdown"
+                value={formatCountdown(liveCountdown)}
+              />
+
+              <RealtimeValue
+                label="Current"
+                value={`${formatNumber(deviceState?.current ?? 0)} mA`}
+              />
+
+              <RealtimeValue
+                label="Power"
+                value={`${formatNumber(deviceState?.power ?? 0)} W`}
+              />
+            </div>
+          </div>
+
+          {/* FIREBASE SESSION */}
+
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 p-6">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Firebase Session
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Session tersimpan secara persistent di Firebase
+              </p>
+            </div>
+
+            <div className="grid gap-4 p-6 sm:grid-cols-2 lg:grid-cols-4">
+              <RealtimeValue label="Session ID" value={session?.id ?? "-"} />
+
+              <RealtimeValue
+                label="Status"
+                value={session?.status ?? "NO SESSION"}
+              />
+
+              <RealtimeValue
+                label="Total Waktu"
+                value={formatMinutes(totalMinutes)}
+              />
+
+              <RealtimeValue
+                label="Total Billing"
+                value={`Rp${totalBilling.toLocaleString("id-ID")}`}
+              />
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+/* =========================================================
+   INFO CARD
+========================================================= */
+
+function InfoCard({
+  icon,
+  title,
+  value,
+  description,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  value: string;
+  description: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-500">{title}</p>
+
+          <p className="mt-2 text-xl font-bold text-slate-900">{value}</p>
+
+          <p className="mt-1 text-xs text-slate-400">{description}</p>
+        </div>
+
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+          {icon}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   REALTIME VALUE
+========================================================= */
+
+function RealtimeValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+        {label}
+      </p>
+
+      <p className="mt-2 break-all text-lg font-bold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+/* =========================================================
+   CALCULATE SESSION COUNTDOWN
+========================================================= */
+
+function calculateSessionCountdown(session: Session | null) {
+  if (!session || session.status !== "ACTIVE" || !session.startedAt) {
+    return 0;
+  }
+
+  const startedAtMs = new Date(session.startedAt).getTime();
+
+  if (!Number.isFinite(startedAtMs)) {
+    return 0;
+  }
+
+  const totalSeconds = Math.max(0, Number(session.totalMinutes || 0) * 60);
+  const endAtMs = startedAtMs + totalSeconds * 1000;
+  const remainingSeconds = Math.ceil((endAtMs - Date.now()) / 1000);
+
+  return Math.max(0, remainingSeconds);
+}
+
+/* =========================================================
+   FORMAT COUNTDOWN
+========================================================= */
+
+function formatCountdown(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+
+  const hours = Math.floor(safeSeconds / 3600);
+
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+
+  const seconds = safeSeconds % 60;
+
+  return [
+    hours.toString().padStart(2, "0"),
+
+    minutes.toString().padStart(2, "0"),
+
+    seconds.toString().padStart(2, "0"),
+  ].join(":");
+}
+
+/* =========================================================
+   FORMAT MINUTES
+========================================================= */
+
+function formatMinutes(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+
+  const remaining = minutes % 60;
+
+  if (hours > 0) {
+    if (remaining > 0) {
+      return `${hours} Jam ${remaining} Menit`;
+    }
+
+    return `${hours} Jam`;
+  }
+
+  return `${remaining} Menit`;
+}
+
+/* =========================================================
+   FORMAT NUMBER
+========================================================= */
+
+function formatNumber(value: number) {
+  return Number(value || 0).toLocaleString("id-ID", {
+    maximumFractionDigits: 2,
+  });
+}
+
+/* =========================================================
+   FORMAT VOLTAGE
+========================================================= */
+
+function formatVoltage(value: number) {
+  return (Number(value || 0) / 10).toLocaleString("id-ID", {
+    minimumFractionDigits: 1,
+
+    maximumFractionDigits: 1,
+  });
+}
