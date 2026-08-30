@@ -93,39 +93,39 @@ export default function Sidebar({
           w-[280px]
         `}
       >
-          {/* =================================================
+        {/* =================================================
               LOGO
           ================================================== */}
 
-          <div className="relative flex h-28 items-center justify-center border-b border-slate-200 px-4">
-            <Link
-              href={isAdmin ? "/admin" : "/"}
-              onClick={handleMobileNavigation}
-              className="flex items-center justify-center"
-            >
-              <Image
-                src="/images/logo-noir-playbox.png"
-                alt="Noir Playbox"
-                width={160}
-                height={80}
-                priority
-                className={`h-auto object-contain transition-all duration-300 ${
-                  collapsed ? "w-12 lg:w-12" : "w-32 lg:w-36"
-                }`}
-              />
-            </Link>
+        <div className="relative flex h-28 items-center justify-center border-b border-slate-200 px-4">
+          <Link
+            href={isAdmin ? "/admin" : "/"}
+            onClick={handleMobileNavigation}
+            className="flex items-center justify-center"
+          >
+            <Image
+              src="/images/logo-noir-playbox.jpeg"
+              alt="Noir Playbox"
+              width={160}
+              height={80}
+              priority
+              className={`h-auto object-contain transition-all duration-300 ${
+                collapsed ? "w-12 lg:w-12" : "w-32 lg:w-36"
+              }`}
+            />
+          </Link>
 
-            {/* CLOSE MOBILE */}
+          {/* CLOSE MOBILE */}
 
-            <button
-              type="button"
-              onClick={onMobileClose}
-              aria-label="Close sidebar"
-              className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 lg:hidden"
-            >
-              <X size={19} />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onMobileClose}
+            aria-label="Close sidebar"
+            className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 lg:hidden"
+          >
+            <X size={19} />
+          </button>
+        </div>
 
         {/* =================================================
             USER ROLE
