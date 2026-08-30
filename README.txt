@@ -1,205 +1,143 @@
-NOIR PLAYBOX
-PREPARING WATCHDOG — VERCEL PRODUCTION V1
-==========================================
+NOIR PLAYBOX — FIREBASE ADMIN VERCEL V1
+=========================================
 
-STATUS SEBELUM PATCH
-====================
-Local end-to-end sudah terbukti:
+TUJUAN
+======
+Firebase Admin tidak lagi wajib membaca file JSON service account
+yang hanya ada di Mac.
 
-PS01 ON
--> PREPARING ACTIVE
--> startedAt dibuat 61 menit lalu
--> watchdog
--> checked=1
--> autoShutdown=1
--> failed=0
--> switch_1=false
--> PREPARING NONE
+Production/Vercel:
+- FIREBASE_ADMIN_PROJECT_ID
+- FIREBASE_ADMIN_CLIENT_EMAIL
+- FIREBASE_ADMIN_PRIVATE_KEY
 
-Patch ini TIDAK mengubah logic auto-shutdown yang sudah lolos test.
-
-
-YANG DITAMBAHKAN
-================
-1. Production hardening:
-   app/api/system/preparing-watchdog/route.ts
-
-2. Safe vercel.json merger:
-   scripts/install-vercel-watchdog-cron.mjs
-
-3. Secret generator:
-   scripts/generate-cron-secret.mjs
-
-4. Reference config:
-   vercel.watchdog.example.json
+Local:
+- GOOGLE_APPLICATION_CREDENTIALS tetap didukung sebagai fallback.
 
 
 INSTALL
 =======
-Dari root project noir-playbox:
+Dari root project:
 
-unzip -o ~/Downloads/noir-watchdog-vercel-production-v1.zip -d .
-
-node scripts/install-vercel-watchdog-cron.mjs
+unzip -o ~/Downloads/noir-firebase-admin-vercel-v1.zip -d .
 
 npm run lint
 npx tsc --noEmit
 npm run build
 
 
-CEK VERCEL.JSON
-===============
-cat vercel.json
+CARA AMBIL NILAI FIREBASE ADMIN
+===============================
+Buka file service account JSON LOKAL yang sudah kamu punya.
 
-Harus mengandung:
+Mapping:
 
-{
-  "path": "/api/system/preparing-watchdog",
-  "schedule": "*/5 * * * *"
-}
+JSON:
+project_id
+-> Vercel:
+FIREBASE_ADMIN_PROJECT_ID
 
-Installer MERGE config:
-- tidak menghapus property vercel.json lain
-- tidak menghapus cron lain
-- jika watchdog cron sudah ada, hanya mengganti jadwal/path entry tersebut
+JSON:
+client_email
+-> Vercel:
+FIREBASE_ADMIN_CLIENT_EMAIL
+
+JSON:
+private_key
+-> Vercel:
+FIREBASE_ADMIN_PRIVATE_KEY
 
 
-PRODUCTION SECRET
-=================
-JANGAN pakai secret lama yang pernah dipakai saat debugging/chat.
+PENTING
+=======
+JANGAN:
+- upload file JSON service account ke GitHub
+- upload file JSON ke public folder
+- kirim private_key ke chat
+- commit .env.local
 
-Generate secret BARU:
+File JSON lokal tetap harus masuk .gitignore.
 
-node scripts/generate-cron-secret.mjs
 
-Copy hasilnya.
+PRIVATE KEY DI VERCEL
+=====================
+Cara paling aman:
+copy VALUE private_key lengkap dari service account JSON,
+termasuk:
 
-Di Vercel:
-Project
--> Settings
--> Environment Variables
--> Add
+-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
 
-Name:
+Paste ke value FIREBASE_ADMIN_PRIVATE_KEY di Vercel.
+
+Kode mendukung:
+1. multiline asli
+2. literal \n
+
+karena backend menjalankan:
+privateKeyRaw.replace(/\\n/g, "\n")
+
+
+ENVIRONMENT VARIABLES VERCEL
+============================
+Minimal set production:
+
+NEXT_PUBLIC_FIREBASE_API_KEY
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+NEXT_PUBLIC_FIREBASE_PROJECT_ID
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+NEXT_PUBLIC_FIREBASE_APP_ID
+
+FIREBASE_ADMIN_PROJECT_ID
+FIREBASE_ADMIN_CLIENT_EMAIL
+FIREBASE_ADMIN_PRIVATE_KEY
+
+TUYA_ACCESS_ID
+TUYA_ACCESS_SECRET
+TUYA_API_BASE_URL
+
 CRON_SECRET
 
-Value:
-<secret baru>
 
-Environment:
-Production
+LOCAL DEVELOPMENT
+=================
+.env.local kamu boleh tetap:
 
-Simpan lalu REDEPLOY.
+GOOGLE_APPLICATION_CREDENTIALS=/Users/.../service-account.json
 
-
-KENAPA CRON_SECRET?
-===================
-Endpoint:
-GET /api/system/preparing-watchdog
-
-memerlukan:
-
-Authorization: Bearer <CRON_SECRET>
-
-Endpoint fail-closed:
-- CRON_SECRET/WATCHDOG_SECRET tidak ada -> 503
-- bearer salah/tidak ada -> 401
-- secret tidak pernah ditulis ke log
-
-Perbandingan secret memakai timingSafeEqual.
+Tidak perlu langsung mengubah local setup.
 
 
-JADWAL
-======
-*/5 * * * *
-
-= setiap 5 menit.
-
-Threshold bisnis tetap:
-PREPARING >=60 menit
-
-Karena cron scan setiap 5 menit, praktik production:
-auto-OFF terjadi sekitar menit 60–65.
-
-Itu normal dan sesuai desain scheduler periodik.
-
-
-PENTING: VERCEL PLAN
+PRIORITAS CREDENTIAL
 ====================
-Jadwal 5 menit membutuhkan Vercel plan yang mengizinkan cron lebih dari sekali sehari.
+Backend menggunakan:
 
-Jika deploy menolak cron dengan pesan bahwa Hobby hanya boleh daily,
-jangan ubah watchdog logic.
+1. FIREBASE_ADMIN_* environment variables
+2. jika tidak ada -> GOOGLE_APPLICATION_CREDENTIALS
 
-Pilihan:
-1. upgrade plan Vercel yang mendukung frequency ini, atau
-2. gunakan external scheduler untuk hit endpoint yang sama.
+Jadi Vercel tidak bergantung filesystem Mac.
 
 
-PRODUCTION HARDENING
+CHECK SEBELUM COMMIT
 ====================
-Route sekarang:
-- Node.js runtime eksplisit
-- force dynamic
-- no cache
-- maxDuration=60
-- GET + POST terlindungi bearer secret
-- fail closed jika secret tidak ada
-- timing-safe secret comparison
-- runId per eksekusi
-- durationMs logging
-- tidak log Authorization/token
-- tidak mengirim stack trace ke client
+Pastikan:
+
+git status
+
+TIDAK menampilkan:
+*.json service account
+.env.local
+
+Setelah itu:
+
+git add .
+git commit -m "make Firebase Admin Vercel compatible"
+git push
 
 
-SEBELUM DEPLOY
-==============
-Jalankan:
-
-npm run lint
-npx tsc --noEmit
-npm run build
-
-Semua harus PASS.
-
-
-SETELAH DEPLOY
-==============
-1. Pastikan CRON_SECRET Production sudah ada.
-2. Redeploy.
-3. Cek Cron Jobs di Vercel.
-4. Path harus:
-   /api/system/preparing-watchdog
-5. Schedule:
-   */5 * * * *
-
-Untuk smoke test manual production, jangan menaruh CRON_SECRET di chat/log.
-
-
-CATATAN SECURITY
-================
-Endpoint development:
-- /api/dev/test-preparing
-- /api/dev/test-preparing/age
-
-sudah dirancang menolak NODE_ENV=production.
-
-Halaman:
-- /admin/watchdog-test
-
-adalah tooling development/admin dan tidak diperlukan sebagai scheduler.
-
-
-ROLLBACK
-========
-Jika perlu rollback cron saja:
-
-hapus entry:
-{
-  "path": "/api/system/preparing-watchdog",
-  "schedule": "*/5 * * * *"
-}
-
-dari vercel.json lalu redeploy.
-
-Logic preparing-watchdog tetap tidak perlu diubah.
+CATATAN
+=======
+.env.vercel.example sengaja kosong dan aman dicommit.
+Jangan pernah isi credential asli di file contoh tersebut.
