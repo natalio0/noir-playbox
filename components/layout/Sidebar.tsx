@@ -99,6 +99,7 @@ export default function Sidebar({
 
         <div className="relative flex h-28 items-center justify-center border-b border-slate-200 px-4">
           <Link
+            prefetch={false}
             href={isAdmin ? "/admin" : "/"}
             onClick={handleMobileNavigation}
             className="flex items-center justify-center"
@@ -380,6 +381,7 @@ function NavItem({
 
   return (
     <Link
+      prefetch={false}
       href={href}
       onClick={onNavigate}
       title={collapsed ? label : undefined}

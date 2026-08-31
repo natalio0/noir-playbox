@@ -29,6 +29,7 @@ export default function RealtimeCard({ psbox }: RealtimeCardProps) {
 
   return (
     <Link
+      prefetch={false}
       href={`/realtime/${psbox.id}`}
       className="block rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md"
     >

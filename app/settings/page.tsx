@@ -39,7 +39,7 @@ type DashboardPreferences = {
 
 const DEFAULT_PREFERENCES: DashboardPreferences = {
   autoRefresh: true,
-  refreshInterval: 5,
+  refreshInterval: 15,
   showOfflineWarning: true,
   compactCards: false,
 };
@@ -462,7 +462,7 @@ export default function SettingsPage() {
                   </p>
 
                   <div className="mt-4 grid grid-cols-3 gap-2">
-                    {[3, 5, 10].map((seconds) => (
+                    {[10, 15, 30].map((seconds) => (
                       <button
                         key={seconds}
                         type="button"

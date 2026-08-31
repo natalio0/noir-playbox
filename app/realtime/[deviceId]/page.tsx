@@ -20,6 +20,7 @@ import Header from "@/components/layout/Header";
 
 import { auth } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import { useSmartPolling } from "@/hooks/useSmartPolling";
 import {
   completeShutdownMode,
   convertPreparingToBilling,
@@ -256,7 +257,7 @@ export default function PSDetailPage({
       const idToken = await user.getIdToken();
 
       const response = await fetch(
-        `/api/sessions/active?deviceId=${encodeURIComponent(deviceId)}`,
+        `/api/sessions/active?deviceId=${encodeURIComponent(deviceId)}&includePackages=1`,
         {
           cache: "no-store",
           headers: {
@@ -511,24 +512,10 @@ export default function PSDetailPage({
      TUYA POLLING
   ======================================================= */
 
-  useEffect(() => {
-    if (!rawDeviceId || !preferences.autoRefresh) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      fetchDeviceState(rawDeviceId);
-    }, preferences.refreshInterval * 1000);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [
-    rawDeviceId,
-    fetchDeviceState,
-    preferences.autoRefresh,
-    preferences.refreshInterval,
-  ]);
+  useSmartPolling(() => fetchDeviceState(rawDeviceId), {
+    enabled: Boolean(rawDeviceId) && preferences.autoRefresh,
+    intervalMs: preferences.refreshInterval * 1000,
+  });
 
   /* =======================================================
      SESSION EXPIRED

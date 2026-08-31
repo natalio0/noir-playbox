@@ -18,6 +18,7 @@ import Sidebar from "@/components/layout/Sidebar";
 import { auth } from "@/lib/firebase";
 import { getCafeDisplayName } from "@/lib/cafes";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import { useSmartPolling } from "@/hooks/useSmartPolling";
 
 type RiskLevel =
   | "NORMAL"
@@ -147,22 +148,10 @@ export default function AdminPage() {
       clearTimeout(timeout);
   }, [fetchAlerts]);
 
-  useEffect(() => {
-    if (!preferences.autoRefresh) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      void fetchAlerts();
-    }, preferences.refreshInterval * 1000);
-
-    return () =>
-      clearInterval(interval);
-  }, [
-    fetchAlerts,
-    preferences.autoRefresh,
-    preferences.refreshInterval,
-  ]);
+  useSmartPolling(() => fetchAlerts(), {
+    enabled: preferences.autoRefresh,
+    intervalMs: preferences.refreshInterval * 1000,
+  });
 
   return (
     <div className="min-h-screen bg-slate-50">

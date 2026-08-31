@@ -22,6 +22,7 @@ import Header from "@/components/layout/Header";
 
 import { auth } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import { useSmartPolling } from "@/hooks/useSmartPolling";
 
 
 /* =========================================================
@@ -484,28 +485,10 @@ export default function RealtimePage() {
      DATA POLLING - SETTINGS CONTROLLED
   ======================================================= */
 
-  useEffect(() => {
-    if (
-      !authReady ||
-      !auth.currentUser ||
-      !preferences.autoRefresh
-    ) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      fetchAllDevices();
-    }, preferences.refreshInterval * 1000);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [
-    authReady,
-    fetchAllDevices,
-    preferences.autoRefresh,
-    preferences.refreshInterval,
-  ]);
+  useSmartPolling(() => fetchAllDevices(), {
+    enabled: authReady && Boolean(auth.currentUser) && preferences.autoRefresh,
+    intervalMs: preferences.refreshInterval * 1000,
+  });
 
   /* =======================================================
      LIVE COUNTDOWN 1 DETIK
@@ -802,6 +785,7 @@ function DeviceCard({
 
   return (
     <Link
+      prefetch={false}
       href={`/realtime/${deviceId}`}
       className="group rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md"
     >

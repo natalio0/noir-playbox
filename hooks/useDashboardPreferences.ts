@@ -11,7 +11,7 @@ export type DashboardPreferences = {
 
 export const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = {
   autoRefresh: true,
-  refreshInterval: 5,
+  refreshInterval: 15,
   showOfflineWarning: true,
   compactCards: false,
 };
@@ -32,7 +32,7 @@ function readPreferences(): DashboardPreferences {
 
     const parsed = JSON.parse(stored);
 
-    const refreshInterval = [3, 5, 10].includes(Number(parsed?.refreshInterval))
+    const refreshInterval = [10, 15, 30].includes(Number(parsed?.refreshInterval))
       ? Number(parsed.refreshInterval)
       : DEFAULT_DASHBOARD_PREFERENCES.refreshInterval;
 

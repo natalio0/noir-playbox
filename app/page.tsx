@@ -36,6 +36,7 @@ import StatCard from "@/components/dashboard/StatCard";
 
 import { auth, db } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import { useSmartPolling } from "@/hooks/useSmartPolling";
 import { mockPSBoxes } from "@/data/mock-psbox";
 
 import {
@@ -374,27 +375,13 @@ export default function Home() {
   /* =======================================================
      POLLING TUYA + FIREBASE
 
-     5 detik cukup untuk dashboard overview.
+     Interval dibuat konservatif agar dashboard tetap responsif tanpa membanjiri API.
   ======================================================= */
 
-  useEffect(() => {
-    if (!authReady || !auth.currentUser || !preferences.autoRefresh) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      fetchDashboard();
-    }, preferences.refreshInterval * 1000);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [
-    authReady,
-    fetchDashboard,
-    preferences.autoRefresh,
-    preferences.refreshInterval,
-  ]);
+  useSmartPolling(() => fetchDashboard(), {
+    enabled: authReady && Boolean(auth.currentUser) && preferences.autoRefresh,
+    intervalMs: preferences.refreshInterval * 1000,
+  });
 
   /* =======================================================
      LIVE COUNTDOWN 1 DETIK
@@ -670,6 +657,7 @@ export default function Home() {
               </div>
 
               <Link
+                prefetch={false}
                 href="/realtime"
                 className="text-sm font-semibold text-blue-600 hover:text-blue-700"
               >
@@ -728,6 +716,7 @@ function DashboardDeviceCard({
 
   return (
     <Link
+      prefetch={false}
       href={`/realtime/${deviceId}`}
       className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md"
     >

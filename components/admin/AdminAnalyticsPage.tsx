@@ -30,6 +30,7 @@ import CafeFilter, {
 } from "@/components/admin/CafeFilter";
 import { auth } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
+import { useSmartPolling } from "@/hooks/useSmartPolling";
 
 type Period =
   | "daily"
@@ -233,25 +234,10 @@ export default function AdminAnalyticsPage({
     fetchData,
   ]);
 
-  useEffect(() => {
-    if (
-      !preferences.autoRefresh
-    ) {
-      return;
-    }
-
-    const interval =
-      setInterval(() => {
-        void fetchData();
-      }, preferences.refreshInterval * 1000);
-
-    return () =>
-      clearInterval(interval);
-  }, [
-    fetchData,
-    preferences.autoRefresh,
-    preferences.refreshInterval,
-  ]);
+  useSmartPolling(() => fetchData(), {
+    enabled: preferences.autoRefresh,
+    intervalMs: preferences.refreshInterval * 1000,
+  });
 
   return (
     <div className="min-h-screen bg-slate-50">
