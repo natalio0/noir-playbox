@@ -3,19 +3,22 @@ import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessCafe } from "@/lib/session-access";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ shutdownId: string }> },
 ) {
+  const trace = createPerfTrace("api.shutdown.complete");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const { shutdownId } = await context.params;
-    const body = await request.json().catch(() => ({}));
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const { shutdownId } = await trace.measure("params", () => context.params);
+    const body = await trace.measure("requestJson", () => request.json().catch(() => ({})));
     const action = String(body.action ?? "COMPLETE").toUpperCase();
 
     const ref = adminDb.collection("shutdown_sessions").doc(shutdownId);
-    const snapshot = await ref.get();
+    const snapshot = await trace.measure("shutdownRead", () => ref.get());
 
     if (!snapshot.exists) {
       return Response.json(
@@ -65,7 +68,8 @@ export async function PATCH(
         createdAt: now,
       });
 
-      await batch.commit();
+      await trace.measure("firestoreBatchCommit", () => batch.commit());
+      trace.finish("ok", { action: "SKIP_REUSE" });
 
       return Response.json({ success: true, skipped: true });
     }
@@ -108,10 +112,12 @@ export async function PATCH(
       createdAt: now,
     });
 
-    await batch.commit();
+    await trace.measure("firestoreBatchCommit", () => batch.commit());
+    trace.finish("ok", { action: "COMPLETE" });
 
     return Response.json({ success: true, durationMinutes });
   } catch (error) {
+    trace.finish("error");
     console.error("COMPLETE SHUTDOWN ERROR:", error);
     const message =
       error instanceof Error ? error.message : "Internal server error";

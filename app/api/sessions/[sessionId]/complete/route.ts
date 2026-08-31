@@ -4,6 +4,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessSession } from "@/lib/session-access";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 function serializeShutdown(
   id: string,
@@ -24,9 +25,11 @@ export async function PATCH(
   request: NextRequest,
   context: { params: Promise<{ sessionId: string }> },
 ) {
+  const trace = createPerfTrace("api.sessions.complete");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const { sessionId } = await context.params;
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const { sessionId } = await trace.measure("params", () => context.params);
 
     if (!sessionId) {
       return NextResponse.json(
@@ -45,9 +48,14 @@ export async function PATCH(
       .collection("shutdown_sessions")
       .doc(`session-${sessionId}`);
 
-    const result = await adminDb.runTransaction(async (transaction) => {
-      const sessionSnapshot = await transaction.get(sessionRef);
-      const shutdownSnapshot = await transaction.get(shutdownRef);
+    const result = await trace.measure("firestoreTransaction", () =>
+      adminDb.runTransaction(async (transaction) => {
+      const sessionSnapshot = await trace.measure("tx.sessionRead", () =>
+        transaction.get(sessionRef),
+      );
+      const shutdownSnapshot = await trace.measure("tx.shutdownRead", () =>
+        transaction.get(shutdownRef),
+      );
 
       if (!sessionSnapshot.exists) {
         throw new Error("SESSION_NOT_FOUND");
@@ -123,7 +131,10 @@ export async function PATCH(
         totalPrice,
         shutdown: serializeShutdown(shutdownRef.id, shutdownData),
       };
-    });
+    }),
+    );
+
+    trace.finish("ok", { alreadyCompleted: result.alreadyCompleted });
 
     return NextResponse.json({
       success: true,
@@ -137,6 +148,7 @@ export async function PATCH(
       shutdown: result.shutdown,
     });
   } catch (error) {
+    trace.finish("error");
     const message =
       error instanceof Error ? error.message : "Gagal menyelesaikan session";
 

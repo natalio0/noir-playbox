@@ -4,13 +4,16 @@ import {
 } from "@/lib/device-registry";
 import { sendTuyaStandardCommands } from "@/lib/tuya-cloud-dynamic";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 type Action = "ON" | "OFF" | "STOP" | "TIMER" | "ADD_TIME";
 
 export async function POST(request: Request) {
+  const trace = createPerfTrace("api.tuya.control");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const body = await request.json();
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const body = await trace.measure("requestJson", () => request.json());
 
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
     const action = String(body.action ?? "").toUpperCase() as Action;
@@ -23,7 +26,9 @@ export async function POST(request: Request) {
       return Response.json({ success: false, error: "Action tidak valid" }, { status: 400 });
     }
 
-    const registered = await resolveRegisteredDevice(deviceId);
+    const registered = await trace.measure("deviceRegistry", () =>
+      resolveRegisteredDevice(deviceId),
+    );
     if (!registered) {
       return Response.json({ success: false, error: "PlayBox belum terdaftar" }, { status: 404 });
     }
@@ -58,7 +63,11 @@ export async function POST(request: Request) {
                 },
               ];
 
-    await sendTuyaStandardCommands(registered.tuyaDeviceId, commands);
+    await trace.measure("tuyaCommand", () =>
+      sendTuyaStandardCommands(registered.tuyaDeviceId, commands),
+    );
+
+    trace.finish("ok", { action });
 
     return Response.json({
       success: true,
@@ -68,6 +77,7 @@ export async function POST(request: Request) {
       commands,
     });
   } catch (error) {
+    trace.finish("error");
     const message = error instanceof Error ? error.message : "Gagal mengontrol Tuya";
     console.error("TUYA STANDARD CONTROL ERROR:", message);
     return Response.json(

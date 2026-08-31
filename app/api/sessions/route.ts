@@ -3,11 +3,14 @@ import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { resolveRentalPackage } from "@/lib/rental-packages";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 export async function POST(request: Request) {
+  const trace = createPerfTrace("api.sessions.create");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const body = await request.json();
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const body = await trace.measure("requestJson", () => request.json());
 
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
     const preparingId = String(body.preparingId ?? "").trim();
@@ -46,8 +49,11 @@ export async function POST(request: Request) {
     let preparingConverted = false;
     const startedAt = Timestamp.now();
 
-    await adminDb.runTransaction(async (transaction) => {
-      const deviceDoc = await transaction.get(deviceRef);
+    await trace.measure("firestoreTransaction", () =>
+      adminDb.runTransaction(async (transaction) => {
+      const deviceDoc = await trace.measure("tx.deviceRead", () =>
+        transaction.get(deviceRef),
+      );
 
       if (!deviceDoc.exists) {
         throw new Error("DEVICE_NOT_FOUND");
@@ -85,9 +91,15 @@ export async function POST(request: Request) {
         .where("status", "==", "SHUTDOWN_PENDING")
         .limit(1);
 
-      const activeSnapshot = await transaction.get(activeQuery);
-      const activeShutdownSnapshot = await transaction.get(activeShutdownQuery);
-      const pendingShutdownSnapshot = await transaction.get(pendingShutdownQuery);
+      const activeSnapshot = await trace.measure("tx.activeSessionQuery", () =>
+        transaction.get(activeQuery),
+      );
+      const activeShutdownSnapshot = await trace.measure("tx.activeShutdownQuery", () =>
+        transaction.get(activeShutdownQuery),
+      );
+      const pendingShutdownSnapshot = await trace.measure("tx.pendingShutdownQuery", () =>
+        transaction.get(pendingShutdownQuery),
+      );
 
       if (!activeSnapshot.empty) {
         throw new Error("SESSION_ACTIVE");
@@ -101,7 +113,9 @@ export async function POST(request: Request) {
       let preparingData: FirebaseFirestore.DocumentData | null = null;
 
       if (resolvedPreparingRef) {
-        const preparingSnapshot = await transaction.get(resolvedPreparingRef);
+        const preparingSnapshot = await trace.measure("tx.preparingDocRead", () =>
+          transaction.get(resolvedPreparingRef!),
+        );
 
         if (!preparingSnapshot.exists) {
           throw new Error("PREPARING_NOT_FOUND");
@@ -120,7 +134,9 @@ export async function POST(request: Request) {
           .where("status", "==", "PREPARING")
           .limit(1);
 
-        const preparingSnapshot = await transaction.get(preparingQuery);
+        const preparingSnapshot = await trace.measure("tx.preparingQuery", () =>
+          transaction.get(preparingQuery),
+        );
 
         if (!preparingSnapshot.empty) {
           const preparingDoc = preparingSnapshot.docs[0];
@@ -190,7 +206,10 @@ export async function POST(request: Request) {
 
         preparingConverted = true;
       }
-    });
+    }),
+    );
+
+    trace.finish("ok", { preparingConverted });
 
     return Response.json({
       success: true,
@@ -218,6 +237,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    trace.finish("error");
     const message = error instanceof Error ? error.message : "Gagal membuat session";
 
     if (message === "DEVICE_NOT_FOUND") {

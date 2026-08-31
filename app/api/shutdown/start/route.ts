@@ -7,6 +7,7 @@ import {
 } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessSession } from "@/lib/session-access";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 function serializeShutdown(
   id: string,
@@ -24,9 +25,11 @@ function serializeShutdown(
 }
 
 export async function POST(request: Request) {
+  const trace = createPerfTrace("api.shutdown.start");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const body = await request.json();
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const body = await trace.measure("requestJson", () => request.json());
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
     const sourceSessionId = body.sourceSessionId
       ? String(body.sourceSessionId).trim()
@@ -39,7 +42,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const registered = await resolveRegisteredDevice(deviceId);
+    const registered = await trace.measure("deviceRegistry", () =>
+      resolveRegisteredDevice(deviceId),
+    );
 
     if (!registered || !registered.active) {
       return Response.json(
@@ -62,7 +67,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const [activeSnapshot, pendingSnapshot] = await Promise.all([
+    const [activeSnapshot, pendingSnapshot] = await trace.measure(
+      "firestoreShutdownChecks",
+      () => Promise.all([
       adminDb
         .collection("shutdown_sessions")
         .where("deviceId", "==", deviceId)
@@ -75,7 +82,8 @@ export async function POST(request: Request) {
         .where("status", "==", "SHUTDOWN_PENDING")
         .limit(1)
         .get(),
-    ]);
+      ]),
+    );
 
     if (!activeSnapshot.empty) {
       const doc = activeSnapshot.docs[0];
@@ -91,14 +99,14 @@ export async function POST(request: Request) {
       const doc = pendingSnapshot.docs[0];
       const ref = doc.ref;
 
-      await ref.update({
+      await trace.measure("firestoreActivatePending", () => ref.update({
         status: "SHUTDOWN_ACTIVE",
         startedAt: now,
         endedAt: null,
         operatorUid: user.uid,
         operatorEmail: user.email ?? null,
         updatedAt: now,
-      });
+      }));
 
       const data: FirebaseFirestore.DocumentData = {
         ...doc.data(),
@@ -108,7 +116,7 @@ export async function POST(request: Request) {
         operatorUid: user.uid,
       };
 
-      await adminDb.collection("audit_logs").add({
+      await trace.measure("firestoreAudit", () => adminDb.collection("audit_logs").add({
         type: "SHUTDOWN_MODE_STARTED",
         deviceId,
         cafeId: registered.cafeId,
@@ -116,7 +124,9 @@ export async function POST(request: Request) {
         sourceSessionId: data.sourceSessionId ?? null,
         operatorUid: user.uid,
         createdAt: now,
-      });
+      }));
+
+      trace.finish("ok", { activatedPending: true });
 
       return Response.json({
         success: true,
@@ -139,10 +149,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const sourceSession = await adminDb
-      .collection("sessions")
-      .doc(sourceSessionId)
-      .get();
+    const sourceSession = await trace.measure("sourceSessionRead", () =>
+      adminDb.collection("sessions").doc(sourceSessionId).get(),
+    );
 
     if (!sourceSession.exists) {
       return Response.json(
@@ -188,9 +197,11 @@ export async function POST(request: Request) {
       updatedAt: now,
     };
 
-    await ref.set(data, { merge: true });
+    await trace.measure("firestoreCreateShutdown", () =>
+      ref.set(data, { merge: true }),
+    );
 
-    await adminDb.collection("audit_logs").add({
+    await trace.measure("firestoreAudit", () => adminDb.collection("audit_logs").add({
       type: "SHUTDOWN_MODE_STARTED",
       deviceId,
       cafeId: registered.cafeId,
@@ -198,13 +209,16 @@ export async function POST(request: Request) {
       sourceSessionId,
       operatorUid: user.uid,
       createdAt: now,
-    });
+    }));
+
+    trace.finish("ok", { legacyFallback: true });
 
     return Response.json({
       success: true,
       shutdown: serializeShutdown(ref.id, data),
     });
   } catch (error) {
+    trace.finish("error");
     console.error("START SHUTDOWN ERROR:", error);
     const message =
       error instanceof Error ? error.message : "Internal server error";

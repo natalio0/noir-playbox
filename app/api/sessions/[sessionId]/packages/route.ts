@@ -5,14 +5,17 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { resolveRentalPackage } from "@/lib/rental-packages";
 import { canAccessSession } from "@/lib/session-access";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 export async function POST(
   request: NextRequest,
   context: { params: Promise<{ sessionId: string }> },
 ) {
+  const trace = createPerfTrace("api.sessions.addPackage");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const { sessionId } = await context.params;
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const { sessionId } = await trace.measure("params", () => context.params);
 
     if (!sessionId) {
       return NextResponse.json(
@@ -21,7 +24,7 @@ export async function POST(
       );
     }
 
-    const body = await request.json();
+    const body = await trace.measure("requestJson", () => request.json());
     const rentalPackage = resolveRentalPackage({
       packageId: body.packageId,
       name: body.name,
@@ -46,8 +49,11 @@ export async function POST(
     let newTotalMinutes = 0;
     let newTotalPrice = 0;
 
-    await adminDb.runTransaction(async (transaction) => {
-      const sessionSnapshot = await transaction.get(sessionRef);
+    await trace.measure("firestoreTransaction", () =>
+      adminDb.runTransaction(async (transaction) => {
+      const sessionSnapshot = await trace.measure("tx.sessionRead", () =>
+        transaction.get(sessionRef),
+      );
 
       if (!sessionSnapshot.exists) {
         throw new Error("SESSION_NOT_FOUND");
@@ -86,7 +92,10 @@ export async function POST(
         totalPrice: newTotalPrice,
         updatedAt: now,
       });
-    });
+    }),
+    );
+
+    trace.finish("ok");
 
     return NextResponse.json({
       success: true,
@@ -108,6 +117,7 @@ export async function POST(
       },
     });
   } catch (error) {
+    trace.finish("error");
     const message = error instanceof Error ? error.message : "Gagal menyimpan package";
 
     if (message === "UNAUTHORIZED") {

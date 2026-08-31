@@ -6,11 +6,14 @@ import {
   resolveRegisteredDevice,
 } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { createPerfTrace } from "@/lib/perf-trace";
 
 export async function POST(request: Request) {
+  const trace = createPerfTrace("api.preparing.start");
+
   try {
-    const user = await requireUserFromRequest(request);
-    const body = await request.json();
+    const user = await trace.measure("auth", () => requireUserFromRequest(request));
+    const body = await trace.measure("requestJson", () => request.json());
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
 
     if (!deviceId) {
@@ -20,7 +23,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const registered = await resolveRegisteredDevice(deviceId);
+    const registered = await trace.measure("deviceRegistry", () =>
+      resolveRegisteredDevice(deviceId),
+    );
 
     if (!registered || !registered.active) {
       return Response.json(
@@ -43,7 +48,9 @@ export async function POST(request: Request) {
       );
     }
 
-    const [existing, activeShutdown] = await Promise.all([
+    const [existing, activeShutdown] = await trace.measure(
+      "firestoreStateChecks",
+      () => Promise.all([
       adminDb
         .collection("preparing_sessions")
         .where("deviceId", "==", deviceId)
@@ -56,7 +63,8 @@ export async function POST(request: Request) {
         .where("status", "==", "SHUTDOWN_ACTIVE")
         .limit(1)
         .get(),
-    ]);
+      ]),
+    );
 
     if (!activeShutdown.empty) {
       return Response.json(
@@ -71,6 +79,8 @@ export async function POST(request: Request) {
     if (!existing.empty) {
       const doc = existing.docs[0];
       const data = doc.data();
+
+      trace.finish("ok", { reusedExisting: true });
 
       return Response.json({
         success: true,
@@ -90,7 +100,7 @@ export async function POST(request: Request) {
     const ref = adminDb.collection("preparing_sessions").doc();
     const now = Timestamp.now();
 
-    await ref.set({
+    await trace.measure("firestoreCreatePreparing", () => ref.set({
       deviceId,
       cafeId: registered.cafeId,
       status: "PREPARING",
@@ -102,7 +112,9 @@ export async function POST(request: Request) {
       operatorEmail: user.email,
       createdAt: now,
       updatedAt: now,
-    });
+    }));
+
+    trace.finish("ok", { reusedExisting: false });
 
     return Response.json({
       success: true,
@@ -118,6 +130,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    trace.finish("error");
     console.error("START PREPARING ERROR:", error);
     const message = error instanceof Error ? error.message : "Internal server error";
 

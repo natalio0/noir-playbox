@@ -1,5 +1,7 @@
 import crypto from "crypto";
 
+import { createPerfTrace } from "@/lib/perf-trace";
+
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 function getConfig() {
@@ -41,17 +43,20 @@ function stringToSign(method: string, path: string, body: string) {
 async function getAccessToken() {
   if (tokenCache && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.token;
 
+  const trace = createPerfTrace("tuya.token.refresh");
   const { clientId, secret, endpoint } = getConfig();
   const path = "/v1.0/token?grant_type=1";
   const t = Date.now().toString();
   const sign = hmac(secret, clientId + t + stringToSign("GET", path, ""));
 
-  const response = await fetch(endpoint + path, {
-    cache: "no-store",
-    headers: { client_id: clientId, sign, t, sign_method: "HMAC-SHA256" },
-  });
+  const response = await trace.measure("network", () =>
+    fetch(endpoint + path, {
+      cache: "no-store",
+      headers: { client_id: clientId, sign, t, sign_method: "HMAC-SHA256" },
+    }),
+  );
 
-  const data = await response.json();
+  const data = await trace.measure("decodeJson", () => response.json());
   if (!response.ok || data?.success !== true || !data?.result?.access_token) {
     throw new Error(String(data?.msg ?? data?.message ?? "Gagal membuat token Tuya"));
   }
@@ -60,35 +65,48 @@ async function getAccessToken() {
     token: data.result.access_token,
     expiresAt: Date.now() + Number(data.result.expire_time ?? 7200) * 1000,
   };
+
+  trace.finish("ok");
   return tokenCache.token;
 }
 
 async function requestTuya(method: "GET" | "POST", path: string, bodyObject?: unknown) {
+  const kind = path.includes("/commands")
+    ? "commands"
+    : path.includes("/shadow/properties")
+      ? "shadow"
+      : "other";
+  const trace = createPerfTrace("tuya.request", { method, kind });
   const { clientId, secret, endpoint } = getConfig();
-  const token = await getAccessToken();
+  const token = await trace.measure("accessToken", () => getAccessToken());
   const body = bodyObject === undefined ? "" : JSON.stringify(bodyObject);
   const t = Date.now().toString();
   const sign = hmac(secret, clientId + token + t + stringToSign(method, path, body));
 
-  const response = await fetch(endpoint + path, {
-    method,
-    cache: "no-store",
-    headers: {
-      client_id: clientId,
-      access_token: token,
-      sign,
-      t,
-      sign_method: "HMAC-SHA256",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    ...(body ? { body } : {}),
-  });
+  const response = await trace.measure("network", () =>
+    fetch(endpoint + path, {
+      method,
+      cache: "no-store",
+      headers: {
+        client_id: clientId,
+        access_token: token,
+        sign,
+        t,
+        sign_method: "HMAC-SHA256",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body } : {}),
+    }),
+  );
 
-  const data = await response.json();
+  const data = await trace.measure("decodeJson", () => response.json());
   if (!response.ok || data?.success !== true) {
+    trace.finish("error", { httpStatus: response.status });
     const code = data?.code !== undefined ? ` [${String(data.code)}]` : "";
     throw new Error(`${String(data?.msg ?? data?.message ?? "Tuya request gagal")}${code}`);
   }
+
+  trace.finish("ok", { httpStatus: response.status });
   return data.result;
 }
 
