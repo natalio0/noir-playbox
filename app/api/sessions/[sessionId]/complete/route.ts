@@ -39,21 +39,24 @@ export async function PATCH(
         throw new Error("SESSION_FORBIDDEN");
       }
 
+      const startedAt = session.startedAt?.toDate?.()
+        ? session.startedAt.toDate().toISOString()
+        : null;
+      const totalMinutes = Number(session.totalMinutes ?? 0);
+      const totalPrice = Number(session.totalPrice ?? 0);
+
       if (session.status === "COMPLETED") {
         return {
           alreadyCompleted: true,
-          startedAt: session.startedAt?.toDate?.()
-            ? session.startedAt.toDate().toISOString()
-            : null,
+          startedAt,
           endedAt:
             session.endedAt instanceof Timestamp
               ? session.endedAt.toDate().toISOString()
               : session.endedAt?.toDate?.()
                 ? session.endedAt.toDate().toISOString()
                 : null,
-          totalMinutes: Number(session.totalMinutes ?? 0),
-          totalPrice: Number(session.totalPrice ?? 0),
-          packages: [] as Array<Record<string, unknown>>,
+          totalMinutes,
+          totalPrice,
         };
       }
 
@@ -62,65 +65,27 @@ export async function PATCH(
       }
 
       /*
-       * Package query ikut berada di transaction. Add-time route juga
-       * mengubah session doc dalam transaction, sehingga COMPLETE dan ADD TIME
-       * yang datang bersamaan akan di-retry oleh Firestore dan tidak kehilangan
-       * total billing.
+       * totalMinutes dan totalPrice sudah dijaga transactionally oleh route
+       * ADD TIME. COMPLETE cukup menyentuh session doc yang sama.
+       * Jika ADD TIME datang bersamaan, Firestore akan mendeteksi conflict dan
+       * me-retry salah satu transaction sehingga total billing tidak hilang.
+       *
+       * Ini menghapus query seluruh subcollection packages dari jalur STOP.
        */
-      const packagesQuery = sessionRef
-        .collection("packages")
-        .orderBy("addedAt", "asc");
-      const packagesSnapshot = await transaction.get(packagesQuery);
-
-      let totalMinutes = 0;
-      let totalPrice = 0;
-
-      const packages = packagesSnapshot.docs.map((packageDoc) => {
-        const packageData = packageDoc.data();
-        const durationMinutes = Number(packageData.durationMinutes ?? 0);
-        const price = Number(packageData.price ?? 0);
-
-        totalMinutes += durationMinutes;
-        totalPrice += price;
-
-        return {
-          id: packageDoc.id,
-          packageId:
-            typeof packageData.packageId === "string"
-              ? packageData.packageId
-              : null,
-          name: String(packageData.name ?? ""),
-          durationMinutes,
-          durationSeconds: Number(
-            packageData.durationSeconds ?? durationMinutes * 60,
-          ),
-          price,
-          type: packageData.type === "INITIAL" ? "INITIAL" : "ADD_TIME",
-          addedAt: packageData.addedAt?.toDate?.()
-            ? packageData.addedAt.toDate().toISOString()
-            : null,
-        };
-      });
-
       const endedAt = Timestamp.now();
 
       transaction.update(sessionRef, {
         status: "COMPLETED",
         endedAt,
-        totalMinutes,
-        totalPrice,
         updatedAt: endedAt,
       });
 
       return {
         alreadyCompleted: false,
-        startedAt: session.startedAt?.toDate?.()
-          ? session.startedAt.toDate().toISOString()
-          : null,
+        startedAt,
         endedAt: endedAt.toDate().toISOString(),
         totalMinutes,
         totalPrice,
-        packages,
       };
     });
 
@@ -133,11 +98,10 @@ export async function PATCH(
       endedAt: result.endedAt,
       totalMinutes: result.totalMinutes,
       totalPrice: result.totalPrice,
-      packageCount: result.packages.length,
-      packages: result.packages,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Gagal menyelesaikan session";
+    const message =
+      error instanceof Error ? error.message : "Gagal menyelesaikan session";
 
     if (message === "UNAUTHORIZED") {
       return NextResponse.json(

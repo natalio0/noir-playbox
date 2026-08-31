@@ -23,7 +23,6 @@ import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
 import { useSmartPolling } from "@/hooks/useSmartPolling";
 import {
   completeShutdownMode,
-  convertPreparingToBilling,
   endPreparingWithoutBilling,
   getActivePreparingSession,
   getActiveShutdownSession,
@@ -647,20 +646,13 @@ export default function PSDetailPage({
 
   async function completeSession(sessionId: string) {
     if (completingRef.current) {
-      return;
+      return null;
     }
 
     completingRef.current = true;
-
     setCompletingSession(true);
 
     try {
-      console.log("🔥 COMPLETE SESSION:", sessionId);
-
-      /*
-       * Firebase Authentication
-       */
-
       const user = auth.currentUser;
 
       if (!user) {
@@ -671,9 +663,7 @@ export default function PSDetailPage({
 
       const response = await fetch(`/api/sessions/${sessionId}/complete`, {
         method: "PATCH",
-
         cache: "no-store",
-
         headers: {
           Authorization: `Bearer ${idToken}`,
         },
@@ -686,33 +676,28 @@ export default function PSDetailPage({
       }
 
       /*
-       * Reset frontend
+       * Firebase sudah menjadi source of truth. Begitu COMPLETE sukses,
+       * UI billing langsung ditutup tanpa menunggu round-trip Tuya.
        */
-
       setLastCompletedSessionId(sessionId);
-
       sessionRef.current = null;
-
       expiryStopRef.current = false;
-
       setSession(null);
-
       setSessionPackages([]);
-
       setLiveCountdown(0);
-
       countdownRef.current = 0;
 
-      console.log("🔥 SESSION COMPLETED:", sessionId);
+      return data;
     } catch (error) {
       console.error("COMPLETE SESSION ERROR:", error);
 
       setError(
         error instanceof Error ? error.message : "Gagal complete session",
       );
+
+      throw error;
     } finally {
       completingRef.current = false;
-
       setCompletingSession(false);
     }
   }
@@ -732,32 +717,32 @@ export default function PSDetailPage({
 
     const response = await fetch("/api/sessions", {
       method: "POST",
-
       headers: {
         "Content-Type": "application/json",
-
         Authorization: `Bearer ${idToken}`,
       },
-
       body: JSON.stringify({
         deviceId: rawDeviceId,
+        preparingId: preparing?.id ?? null,
         packageId: pkg.id,
-        durationSeconds: pkg.durationMinutes * 60,
         durationMinutes: pkg.durationMinutes,
         packageName: pkg.name,
         price: pkg.price,
       }),
-
       cache: "no-store",
     });
 
     const data = await response.json();
 
-    if (!response.ok || !data.success) {
+    if (!response.ok || !data.success || !data.session) {
       throw new Error(data.error || "Gagal membuat session");
     }
 
-    return data.sessionId as string;
+    return {
+      session: data.session as Session,
+      package: (data.package ?? null) as SessionPackage | null,
+      preparingConverted: Boolean(data.preparingConverted),
+    };
   }
 
   /* =======================================================
@@ -778,31 +763,30 @@ export default function PSDetailPage({
 
     const response = await fetch(`/api/sessions/${sessionId}/packages`, {
       method: "POST",
-
       headers: {
         "Content-Type": "application/json",
-
         Authorization: `Bearer ${idToken}`,
       },
-
       body: JSON.stringify({
         packageId: pkg.id,
         name: pkg.name,
         durationMinutes: pkg.durationMinutes,
-        durationSeconds: pkg.durationMinutes * 60,
         price: pkg.price,
       }),
-
       cache: "no-store",
     });
 
     const data = await response.json();
 
-    if (!response.ok || !data.success) {
+    if (!response.ok || !data.success || !data.session || !data.package) {
       throw new Error(data.error || "Gagal menyimpan package");
     }
 
-    return data;
+    return {
+      package: data.package as SessionPackage,
+      totalMinutes: Number(data.session.totalMinutes ?? 0),
+      totalPrice: Number(data.session.totalPrice ?? 0),
+    };
   }
 
   /* =======================================================
@@ -1006,37 +990,12 @@ export default function PSDetailPage({
 
     try {
       setControlLoading(true);
-
       setError(null);
 
       const selectedPackage =
         durationMinutes !== undefined
           ? PACKAGES.find((pkg) => pkg.durationMinutes === durationMinutes)
           : undefined;
-
-      /*
-       * ===================================================
-       * ADD TIME
-       * ===================================================
-       */
-
-      let currentCountdown = 0;
-
-      if (action === "ADD_TIME") {
-        const activeSession = sessionRef.current;
-
-        if (!activeSession) {
-          throw new Error("Tidak ada session aktif");
-        }
-
-        currentCountdown = calculateSessionCountdown(activeSession);
-      }
-
-      /*
-       * ===================================================
-       * TUYA CONTROL
-       * ===================================================
-       */
 
       const user = auth.currentUser;
 
@@ -1046,84 +1005,238 @@ export default function PSDetailPage({
 
       const idToken = await user.getIdToken();
 
-      const response = await fetch("/api/tuya/control", {
-        method: "POST",
+      const sendTuyaCommand = async (
+        requestedAction: "ON" | "OFF" | "TIMER" | "ADD_TIME" | "STOP",
+        options?: { durationMinutes?: number; currentCountdown?: number },
+      ) => {
+        const response = await fetch("/api/tuya/control", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            deviceId: rawDeviceId,
+            action: requestedAction,
+            ...(options?.durationMinutes !== undefined
+              ? { durationMinutes: options.durationMinutes }
+              : {}),
+            ...(options?.currentCountdown !== undefined
+              ? { currentCountdown: options.currentCountdown }
+              : {}),
+          }),
+          cache: "no-store",
+        });
 
-        headers: {
-          "Content-Type": "application/json",
+        const data = await response.json();
 
-          Authorization: `Bearer ${idToken}`,
-        },
+        if (!response.ok || !data.success) {
+          const errorMessage = String(data.error || "Gagal mengontrol Tuya");
 
-        body: JSON.stringify({
-          deviceId: rawDeviceId,
+          if (
+            errorMessage.toLowerCase().includes("offline") ||
+            errorMessage.includes("40000801")
+          ) {
+            setDeviceOnline(false);
+            setDeviceState(null);
 
-          action,
+            if (!sessionRef.current) {
+              countdownRef.current = 0;
+              setLiveCountdown(0);
+            }
 
-          ...(durationMinutes !== undefined
-            ? {
-                durationMinutes,
-              }
-            : {}),
+            setError(null);
 
-          ...(action === "ADD_TIME"
-            ? {
-                currentCountdown,
-              }
-            : {}),
-        }),
-
-        cache: "no-store",
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        const errorMessage = data.error || "Gagal mengontrol Tuya";
-
-        // Device offline → tampilkan notifikasi UI saja
-        if (
-          errorMessage.toLowerCase().includes("offline") ||
-          errorMessage.includes("40000801")
-        ) {
-          setDeviceOnline(false);
-          setDeviceState(null);
-          if (!sessionRef.current) {
-            countdownRef.current = 0;
-            setLiveCountdown(0);
-          }
-          setError(null);
-
-          if (preferences.showOfflineWarning) {
-            showNotification(
-              "warning",
-              `${rawDeviceId.toUpperCase()} sedang offline. Cek listrik dan koneksi Wi-Fi BARDI Smart Plug.`,
-            );
+            if (preferences.showOfflineWarning) {
+              showNotification(
+                "warning",
+                `${rawDeviceId.toUpperCase()} sedang offline. Cek listrik dan koneksi Wi-Fi BARDI Smart Plug.`,
+              );
+            }
           }
 
-          return;
+          throw new Error(errorMessage);
         }
 
-        throw new Error(errorMessage);
+        return data;
+      };
+
+      const verifyTuyaInBackground = () => {
+        void (async () => {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            await fetchDeviceState(rawDeviceId);
+          } catch (verificationError) {
+            console.error("BACKGROUND TUYA VERIFY ERROR:", verificationError);
+          }
+        })();
+      };
+
+      /* ===================================================
+         STOP BILLING — FIREBASE FIRST
+
+         Billing ditutup lebih dulu karena Firebase adalah source of truth.
+         Setelah itu UI langsung selesai. STOP BARDI dikirim background agar
+         operator tidak perlu menunggu round-trip Tuya untuk keluar dari state
+         billing.
+      =================================================== */
+
+      if (action === "STOP" && sessionRef.current) {
+        const activeSession = sessionRef.current;
+
+        await completeSession(activeSession.id);
+
+        setDeviceState((current) =>
+          current
+            ? {
+                ...current,
+                switch: false,
+                countdown: 0,
+              }
+            : current,
+        );
+        setLiveCountdown(0);
+        countdownRef.current = 0;
+
+        showNotification(
+          "success",
+          "Session selesai. Monitor sedang dimatikan.",
+        );
+
+        void (async () => {
+          try {
+            await sendTuyaCommand("STOP");
+            verifyTuyaInBackground();
+          } catch (stopError) {
+            console.error("BACKGROUND STOP TUYA ERROR:", stopError);
+
+            showNotification(
+              "warning",
+              "Billing sudah selesai, tetapi BARDI belum dapat dikonfirmasi OFF. Cek monitor secara manual.",
+            );
+          }
+        })();
+
+        return;
       }
 
-      /*
-       * ===================================================
-       * POWER ON → PREPARING
-       * ===================================================
-       */
+      /* ===================================================
+         ADD TIME
+
+         Tidak lagi reload active session dan tidak melakukan dua kali GET
+         status Tuya. Response transaction Firebase langsung dipakai untuk
+         memperbarui countdown/revenue di UI.
+      =================================================== */
+
+      if (action === "ADD_TIME" && selectedPackage) {
+        const activeSession = sessionRef.current;
+
+        if (!activeSession) {
+          throw new Error("Tidak ada session aktif");
+        }
+
+        const currentCountdown = calculateSessionCountdown(activeSession);
+        const added = await addPackageToFirebase(
+          activeSession.id,
+          selectedPackage,
+        );
+
+        const updatedSession: Session = {
+          ...activeSession,
+          totalMinutes: added.totalMinutes,
+          totalPrice: added.totalPrice,
+        };
+
+        sessionRef.current = updatedSession;
+        setSession(updatedSession);
+        setSessionPackages((current) => [...current, added.package]);
+
+        const updatedCountdown = calculateSessionCountdown(updatedSession);
+        countdownRef.current = updatedCountdown;
+        setLiveCountdown(updatedCountdown);
+
+        try {
+          await sendTuyaCommand("ADD_TIME", {
+            durationMinutes: selectedPackage.durationMinutes,
+            currentCountdown,
+          });
+        } catch (tuyaError) {
+          console.error("ADD TIME TUYA SYNC ERROR:", tuyaError);
+
+          showNotification(
+            "warning",
+            "Waktu billing sudah bertambah di Firebase, tetapi timer BARDI belum tersinkron. Coba refresh status device.",
+          );
+        }
+
+        verifyTuyaInBackground();
+        return;
+      }
+
+      /* ===================================================
+         TUYA CONTROL UTAMA
+      =================================================== */
+
+      await sendTuyaCommand(action, {
+        ...(durationMinutes !== undefined ? { durationMinutes } : {}),
+      });
+
+      /* Optimistic device state: jangan tunggu GET Tuya berikutnya. */
+      if (action === "ON") {
+        setDeviceOnline(true);
+        setDeviceState((current) =>
+          current
+            ? { ...current, switch: true }
+            : {
+                switch: true,
+                countdown: 0,
+                power: 0,
+                current: 0,
+                voltage: 0,
+              },
+        );
+      }
+
+      if (action === "TIMER" && selectedPackage) {
+        const seconds = selectedPackage.durationMinutes * 60;
+
+        setDeviceOnline(true);
+        setDeviceState((current) =>
+          current
+            ? { ...current, switch: true, countdown: seconds }
+            : {
+                switch: true,
+                countdown: seconds,
+                power: 0,
+                current: 0,
+                voltage: 0,
+              },
+        );
+        countdownRef.current = seconds;
+        setLiveCountdown(seconds);
+      }
+
+      if (action === "OFF" || action === "STOP") {
+        setDeviceState((current) =>
+          current
+            ? { ...current, switch: false, countdown: 0 }
+            : current,
+        );
+        countdownRef.current = 0;
+        setLiveCountdown(0);
+      }
+
+      /* ===================================================
+         POWER ON → PREPARING
+
+         /api/preparing/start sudah idempotent. Tidak perlu GET active
+         PREPARING dulu, sehingga satu network round-trip dihapus.
+      =================================================== */
 
       if (action === "ON" && !sessionRef.current && !shutdownMode) {
         try {
-          const activePreparing = await getActivePreparingSession(rawDeviceId);
-
-          if (activePreparing) {
-            setPreparing(activePreparing);
-          } else {
-            const createdPreparing = await startPreparingSession(rawDeviceId);
-
-            setPreparing(createdPreparing);
-          }
+          const activePreparing = await startPreparingSession(rawDeviceId);
+          setPreparing(activePreparing);
         } catch (preparingError) {
           console.error("START PREPARING ERROR:", preparingError);
 
@@ -1134,122 +1247,68 @@ export default function PSDetailPage({
         }
       }
 
-      /*
-       * ===================================================
-       * TIMER / SESSION BARU
-       * ===================================================
-       */
+      /* ===================================================
+         TIMER / SESSION BARU
+
+         Endpoint session sekarang sekaligus:
+         - membuat billing
+         - membuat INITIAL package
+         - mengonversi PREPARING bila ada
+         - mengembalikan object session lengkap
+
+         Jadi tidak ada lagi restoreActiveSession + PATCH preparing terpisah.
+      =================================================== */
 
       if (action === "TIMER" && selectedPackage) {
-        /*
-         * Jangan membuat session
-         * kalau ternyata sudah ada.
-         */
-
         if (sessionRef.current) {
           throw new Error("Masih ada session aktif");
         }
 
         try {
-          const sessionId = await createSession(selectedPackage);
+          const created = await createSession(selectedPackage);
+          const createdSession = created.session;
 
-          /*
-           * Ambil kembali session dari Firebase
-           */
+          sessionRef.current = createdSession;
+          expiryStopRef.current = false;
+          setSession(createdSession);
+          setSessionPackages(created.package ? [created.package] : []);
 
-          await restoreActiveSession(rawDeviceId);
+          const countdown = calculateSessionCountdown(createdSession);
+          countdownRef.current = countdown;
+          setLiveCountdown(countdown);
 
-          if (preparing) {
-            try {
-              await convertPreparingToBilling(preparing.id, sessionId);
-
-              setPreparing(null);
-            } catch (preparingError) {
-              console.error("CONVERT PREPARING ERROR:", preparingError);
-
-              showNotification(
-                "warning",
-                "Billing sudah dimulai, tetapi audit PREPARING gagal dikonversi.",
-              );
-            }
+          if (created.preparingConverted || preparing) {
+            setPreparing(null);
           }
 
-          console.log("🔥 SESSION STARTED:", sessionId);
-        } catch (error) {
+          showNotification("success", "Billing berhasil dimulai.");
+        } catch (firebaseError) {
           /*
-           * Firebase gagal setelah Tuya timer berhasil.
-           *
-           * Stop Tuya supaya tidak ada rental
-           * tanpa transaksi.
+           * Tuya TIMER sudah aktif tetapi Firebase gagal. STOP tetap ditunggu
+           * di jalur error agar tidak meninggalkan rental tanpa transaksi.
            */
-
-          console.error("FIREBASE SESSION FAILED:", error);
+          console.error("FIREBASE SESSION FAILED:", firebaseError);
 
           try {
-            const currentUser = auth.currentUser;
+            await sendTuyaCommand("STOP");
+            setDeviceState((current) =>
+              current
+                ? { ...current, switch: false, countdown: 0 }
+                : current,
+            );
+            countdownRef.current = 0;
+            setLiveCountdown(0);
+          } catch (rollbackError) {
+            console.error("TUYA TIMER ROLLBACK ERROR:", rollbackError);
+          }
 
-            if (currentUser) {
-              const currentToken = await currentUser.getIdToken();
-
-              await fetch("/api/tuya/control", {
-                method: "POST",
-
-                headers: {
-                  "Content-Type": "application/json",
-
-                  Authorization: `Bearer ${currentToken}`,
-                },
-
-                body: JSON.stringify({
-                  deviceId: rawDeviceId,
-
-                  action: "STOP",
-                }),
-              });
-            }
-          } catch {}
-
-          throw error;
+          throw firebaseError;
         }
       }
 
-      /*
-       * ===================================================
-       * ADD TIME
-       * ===================================================
-       */
-
-      if (action === "ADD_TIME" && selectedPackage) {
-        const activeSession = sessionRef.current;
-
-        if (!activeSession) {
-          throw new Error("Tidak ada session aktif");
-        }
-
-        /*
-         * Simpan package ke Firebase
-         */
-
-        await addPackageToFirebase(activeSession.id, selectedPackage);
-
-        /*
-         * Reload session dari Firebase
-         */
-
-        await restoreActiveSession(rawDeviceId);
-
-        /*
-         * Sinkronkan countdown Tuya
-         */
-
-        await fetchDeviceState(rawDeviceId);
-      }
-
-      /*
-       * ===================================================
-       * MONITOR OFF TANPA BILLING
-       * ===================================================
-       */
+      /* ===================================================
+         MONITOR OFF TANPA BILLING
+      =================================================== */
 
       if (
         (action === "OFF" || action === "STOP") &&
@@ -1258,7 +1317,6 @@ export default function PSDetailPage({
       ) {
         try {
           await endPreparingWithoutBilling(preparing.id);
-
           setPreparing(null);
         } catch (preparingError) {
           console.error("END PREPARING WITHOUT BILLING ERROR:", preparingError);
@@ -1266,34 +1324,22 @@ export default function PSDetailPage({
       }
 
       /*
-       * ===================================================
-       * STOP
-       * ===================================================
+       * Verifikasi Tuya tetap dilakukan, tetapi background. Operator tidak
+       * perlu menunggu delay + GET status untuk menyelesaikan klik.
        */
-
-      if (action === "STOP") {
-        const activeSession = sessionRef.current;
-
-        if (activeSession) {
-          await completeSession(activeSession.id);
-        }
-      }
-
-      /*
-       * ===================================================
-       * REFRESH TUYA
-       * ===================================================
-       */
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      await fetchDeviceState(rawDeviceId);
+      verifyTuyaInBackground();
     } catch (error) {
       console.error("CONTROL DEVICE ERROR:", error);
 
-      setError(
-        error instanceof Error ? error.message : "Gagal mengontrol device",
-      );
+      const message =
+        error instanceof Error ? error.message : "Gagal mengontrol device";
+      const offline =
+        message.toLowerCase().includes("offline") ||
+        message.includes("40000801");
+
+      if (!offline) {
+        setError(message);
+      }
     } finally {
       setControlLoading(false);
     }

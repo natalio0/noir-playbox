@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
 import {
@@ -70,23 +70,21 @@ export async function POST(request: Request) {
     }
 
     const ref = adminDb.collection("preparing_sessions").doc();
+    const now = Timestamp.now();
 
     await ref.set({
       deviceId,
       cafeId: registered.cafeId,
       status: "PREPARING",
-      startedAt: FieldValue.serverTimestamp(),
+      startedAt: now,
       activatedAt: null,
       endedAt: null,
       billingSessionId: null,
       operatorUid: user.uid,
       operatorEmail: user.email,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
+      createdAt: now,
+      updatedAt: now,
     });
-
-    const created = await ref.get();
-    const data = created.data()!;
 
     return Response.json({
       success: true,
@@ -94,7 +92,7 @@ export async function POST(request: Request) {
         id: ref.id,
         deviceId,
         status: "PREPARING",
-        startedAt: data.startedAt?.toDate?.().toISOString?.() ?? null,
+        startedAt: now.toDate().toISOString(),
         activatedAt: null,
         endedAt: null,
         billingSessionId: null,

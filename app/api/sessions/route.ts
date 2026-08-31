@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
@@ -10,6 +10,7 @@ export async function POST(request: Request) {
     const body = await request.json();
 
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
+    const preparingId = String(body.preparingId ?? "").trim();
     const rentalPackage = resolveRentalPackage({
       packageId: body.packageId,
       name: body.packageName,
@@ -37,8 +38,13 @@ export async function POST(request: Request) {
     const deviceRef = adminDb.collection("devices").doc(deviceId);
     const sessionRef = adminDb.collection("sessions").doc();
     const packageRef = sessionRef.collection("packages").doc();
+    const preparingRef = preparingId
+      ? adminDb.collection("preparing_sessions").doc(preparingId)
+      : null;
 
     let cafeId = "";
+    let preparingConverted = false;
+    const startedAt = Timestamp.now();
 
     await adminDb.runTransaction(async (transaction) => {
       const deviceDoc = await transaction.get(deviceRef);
@@ -61,10 +67,6 @@ export async function POST(request: Request) {
         throw new Error("DEVICE_FORBIDDEN");
       }
 
-      /*
-       * Query ACTIVE dijalankan di transaction agar dua request START yang
-       * datang bersamaan tidak sama-sama lolos pengecekan.
-       */
       const activeQuery = adminDb
         .collection("sessions")
         .where("deviceId", "==", deviceId)
@@ -77,18 +79,63 @@ export async function POST(request: Request) {
         throw new Error("SESSION_ACTIVE");
       }
 
+      let resolvedPreparingRef = preparingRef;
+      let preparingData: FirebaseFirestore.DocumentData | null = null;
+
+      if (resolvedPreparingRef) {
+        const preparingSnapshot = await transaction.get(resolvedPreparingRef);
+
+        if (!preparingSnapshot.exists) {
+          throw new Error("PREPARING_NOT_FOUND");
+        }
+
+        preparingData = preparingSnapshot.data() ?? null;
+      } else {
+        /*
+         * Fallback server-side: jika client belum sempat menerima preparingId,
+         * cari PREPARING aktif untuk device ini. Dengan begitu billing tetap
+         * mengonversi audit PREPARING tanpa request PATCH tambahan.
+         */
+        const preparingQuery = adminDb
+          .collection("preparing_sessions")
+          .where("deviceId", "==", deviceId)
+          .where("status", "==", "PREPARING")
+          .limit(1);
+
+        const preparingSnapshot = await transaction.get(preparingQuery);
+
+        if (!preparingSnapshot.empty) {
+          const preparingDoc = preparingSnapshot.docs[0];
+          resolvedPreparingRef = preparingDoc.ref;
+          preparingData = preparingDoc.data();
+        }
+      }
+
+      if (preparingData) {
+        if (preparingData.status !== "PREPARING") {
+          throw new Error("PREPARING_NOT_ACTIVE");
+        }
+
+        if (
+          String(preparingData.deviceId ?? "").toUpperCase() !== deviceId ||
+          String(preparingData.cafeId ?? "") !== cafeId
+        ) {
+          throw new Error("PREPARING_MISMATCH");
+        }
+      }
+
       transaction.set(sessionRef, {
         deviceId,
         cafeId,
         status: "ACTIVE",
-        startedAt: FieldValue.serverTimestamp(),
+        startedAt,
         endedAt: null,
         totalMinutes: rentalPackage.durationMinutes,
         totalPrice: rentalPackage.price,
         operatorUid: user.uid,
         operatorEmail: user.email ?? null,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
+        createdAt: startedAt,
+        updatedAt: startedAt,
       });
 
       transaction.set(packageRef, {
@@ -98,14 +145,45 @@ export async function POST(request: Request) {
         durationSeconds: rentalPackage.durationMinutes * 60,
         price: rentalPackage.price,
         type: "INITIAL",
-        addedAt: FieldValue.serverTimestamp(),
+        addedAt: startedAt,
       });
+
+      if (resolvedPreparingRef && preparingData) {
+        transaction.update(resolvedPreparingRef, {
+          status: "CONVERTED_TO_BILLING",
+          billingSessionId: sessionRef.id,
+          activatedAt: startedAt,
+          updatedAt: startedAt,
+        });
+
+        preparingConverted = true;
+      }
     });
 
     return Response.json({
       success: true,
       sessionId: sessionRef.id,
       cafeId,
+      preparingConverted,
+      session: {
+        id: sessionRef.id,
+        deviceId,
+        status: "ACTIVE",
+        startedAt: startedAt.toDate().toISOString(),
+        endedAt: null,
+        totalMinutes: rentalPackage.durationMinutes,
+        totalPrice: rentalPackage.price,
+      },
+      package: {
+        id: packageRef.id,
+        packageId: rentalPackage.id,
+        name: rentalPackage.name,
+        durationMinutes: rentalPackage.durationMinutes,
+        durationSeconds: rentalPackage.durationMinutes * 60,
+        price: rentalPackage.price,
+        type: "INITIAL",
+        addedAt: startedAt.toDate().toISOString(),
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Gagal membuat session";
@@ -134,6 +212,27 @@ export async function POST(request: Request) {
     if (message === "SESSION_ACTIVE") {
       return Response.json(
         { success: false, error: "PlayBox masih memiliki session ACTIVE" },
+        { status: 409 },
+      );
+    }
+
+    if (message === "PREPARING_NOT_FOUND") {
+      return Response.json(
+        { success: false, error: "PREPARING tidak ditemukan" },
+        { status: 409 },
+      );
+    }
+
+    if (message === "PREPARING_NOT_ACTIVE") {
+      return Response.json(
+        { success: false, error: "PREPARING sudah tidak aktif" },
+        { status: 409 },
+      );
+    }
+
+    if (message === "PREPARING_MISMATCH") {
+      return Response.json(
+        { success: false, error: "PREPARING tidak sesuai dengan PlayBox" },
         { status: 409 },
       );
     }
