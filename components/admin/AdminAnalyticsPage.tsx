@@ -220,23 +220,32 @@ export default function AdminAnalyticsPage({
       [cafeId, period],
     );
 
+  /* Cafe list hanya perlu diambil saat komponen mount. */
   useEffect(() => {
-    const timeout =
-      setTimeout(() => {
-        void fetchCafes();
-        void fetchData();
-      }, 0);
+    const timeout = setTimeout(() => {
+      void fetchCafes();
+    }, 0);
 
-    return () =>
-      clearTimeout(timeout);
-  }, [
-    fetchCafes,
-    fetchData,
-  ]);
+    return () => clearTimeout(timeout);
+  }, [fetchCafes]);
 
+  /* Analytics refresh saat period/cafe berubah. */
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      void fetchData();
+    }, 0);
+
+    return () => clearTimeout(timeout);
+  }, [fetchData]);
+
+  /*
+   * Analytics agregat tidak perlu polling seagresif realtime monitoring.
+   * Minimal 60 detik mengurangi Firestore reads saat halaman dibiarkan terbuka.
+   */
   useSmartPolling(() => fetchData(), {
     enabled: preferences.autoRefresh,
-    intervalMs: preferences.refreshInterval * 1000,
+    intervalMs:
+      Math.max(preferences.refreshInterval, 60) * 1000,
   });
 
   return (

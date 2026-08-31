@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Image from "next/image";
 import Link from "next/link";
@@ -28,6 +28,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  where,
 } from "firebase/firestore";
 
 import Sidebar from "@/components/layout/Sidebar";
@@ -37,7 +38,6 @@ import StatCard from "@/components/dashboard/StatCard";
 import { auth, db } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
 import { useSmartPolling } from "@/hooks/useSmartPolling";
-import { mockPSBoxes } from "@/data/mock-psbox";
 
 import {
   Bar,
@@ -104,6 +104,9 @@ export default function Home() {
 
   const [devices, setDevices] = useState<Record<string, DashboardDevice>>({});
 
+  const dashboardRequestInFlightRef = useRef<Promise<void> | null>(null);
+  const dashboardLastRequestAtRef = useRef(0);
+
   /* =======================================================
      FIREBASE AUTH READY
   ======================================================= */
@@ -119,243 +122,103 @@ export default function Home() {
   }, []);
 
   /* =======================================================
-     FETCH TUYA DEVICE
-  ======================================================= */
-
-  const fetchDevice = useCallback(
-    async (deviceId: string): Promise<DashboardDevice> => {
-      const normalizedId = deviceId.toUpperCase();
-
-      try {
-        const user = auth.currentUser;
-
-        if (!user) {
-          return {
-            id: normalizedId,
-            status: "OFFLINE",
-            online: false,
-            state: null,
-            session: null,
-            loading: false,
-            accessDenied: false,
-            error: "User belum login",
-            updatedAt: null,
-          };
-        }
-
-        const idToken = await user.getIdToken();
-
-        const response = await fetch(
-          `/api/tuya/device/${encodeURIComponent(normalizedId)}`,
-          {
-            cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${idToken}`,
-            },
-          },
-        );
-
-        const data = await response.json();
-
-        if (response.status === 403) {
-          return {
-            id: normalizedId,
-            status: "OFFLINE",
-            online: false,
-            state: null,
-            session: null,
-            loading: false,
-            accessDenied: true,
-            error: null,
-            updatedAt: null,
-          };
-        }
-
-        if (
-          data.online === false ||
-          String(data.error ?? "")
-            .toLowerCase()
-            .includes("offline") ||
-          String(data.error ?? "").includes("40000801")
-        ) {
-          return {
-            id: normalizedId,
-            status: "OFFLINE",
-            online: false,
-            state: null,
-            session: null,
-            loading: false,
-            accessDenied: false,
-            error: null,
-            updatedAt: data.updatedAt ?? new Date().toISOString(),
-          };
-        }
-
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Gagal mengambil status device");
-        }
-
-        const state = data.state as DeviceState;
-
-        return {
-          id: normalizedId,
-          status: state.switch ? "ON" : "OFF",
-          online: true,
-          state,
-          session: null,
-          loading: false,
-          accessDenied: false,
-          error: null,
-          updatedAt: data.updatedAt ?? new Date().toISOString(),
-        };
-      } catch (error) {
-        console.error(`FETCH ${normalizedId} ERROR:`, error);
-
-        return {
-          id: normalizedId,
-          status: "OFFLINE",
-          online: false,
-          state: null,
-          session: null,
-          loading: false,
-          accessDenied: false,
-          error:
-            error instanceof Error ? error.message : "Gagal mengambil device",
-          updatedAt: null,
-        };
-      }
-    },
-    [],
-  );
-
-  /* =======================================================
-     FETCH ACTIVE SESSION
-  ======================================================= */
-
-  const fetchActiveSession = useCallback(
-    async (deviceId: string): Promise<ActiveSession | null> => {
-      const user = auth.currentUser;
-
-      if (!user) {
-        return null;
-      }
-
-      try {
-        const idToken = await user.getIdToken();
-
-        const response = await fetch(
-          `/api/sessions/active?deviceId=${encodeURIComponent(deviceId)}`,
-          {
-            cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${idToken}`,
-            },
-          },
-        );
-
-        const data = await response.json();
-
-        if (response.status === 403) {
-          return null;
-        }
-
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Gagal mengambil active session");
-        }
-
-        if (!data.active || !data.session) {
-          return null;
-        }
-
-        return data.session as ActiveSession;
-      } catch (error) {
-        console.error(`FETCH SESSION ${deviceId} ERROR:`, error);
-
-        return null;
-      }
-    },
-    [],
-  );
-
-  /* =======================================================
-     FETCH ALL DASHBOARD DATA
+     FETCH DASHBOARD - SHARED BATCH ENDPOINT
   ======================================================= */
 
   const fetchDashboard = useCallback(
     async (manual = false) => {
-      if (!auth.currentUser) {
+      const user = auth.currentUser;
+
+      if (!user) {
         return;
       }
+
+      if (dashboardRequestInFlightRef.current) {
+        await dashboardRequestInFlightRef.current;
+        return;
+      }
+
+      const now = Date.now();
+      const cooldownMs = 3000;
+
+      if (
+        !manual &&
+        now - dashboardLastRequestAtRef.current < cooldownMs
+      ) {
+        return;
+      }
+
+      dashboardLastRequestAtRef.current = now;
 
       if (manual) {
         setRefreshing(true);
       }
 
-      const deviceIds = mockPSBoxes.map((device) =>
-        String(device.id).toUpperCase(),
-      );
+      const requestPromise = (async () => {
+        try {
+          const idToken = await user.getIdToken();
 
-      setDevices((current) => {
-        const next = { ...current };
+          const response = await fetch("/api/realtime/overview", {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+            },
+          });
 
-        for (const id of deviceIds) {
-          if (!next[id]) {
-            next[id] = {
-              id,
-              status: "OFFLINE",
-              online: false,
-              state: null,
-              session: null,
-              loading: true,
-              accessDenied: false,
-              error: null,
-              updatedAt: null,
-            };
+          const data = await response.json();
+
+          if (!response.ok || !data.success) {
+            throw new Error(
+              data.error || "Gagal mengambil dashboard overview",
+            );
           }
-        }
 
-        return next;
-      });
+          const realtime = (data.devices ?? []) as DashboardDevice[];
 
-      try {
-        const results = await Promise.all(
-          deviceIds.map(async (deviceId) => {
-            const [device, session] = await Promise.all([
-              fetchDevice(deviceId),
-              fetchActiveSession(deviceId),
-            ]);
+          const next: Record<string, DashboardDevice> = {};
 
-            return {
+          for (const device of realtime) {
+            const id = String(device.id).toUpperCase();
+
+            next[id] = {
               ...device,
-              session,
+              id,
               state: device.state
                 ? {
                     ...device.state,
-                    countdown: session
-                      ? calculateSessionCountdown(session)
-                      : Math.max(0, Number(device.state.countdown ?? 0)),
+                    countdown: device.session
+                      ? calculateSessionCountdown(device.session)
+                      : Math.max(
+                          0,
+                          Number(device.state.countdown ?? 0),
+                        ),
                   }
                 : null,
             };
-          }),
-        );
-
-        setDevices((current) => {
-          const next = { ...current };
-
-          for (const result of results) {
-            next[result.id] = result;
           }
 
-          return next;
-        });
+          setDevices(next);
+          setLastSynced(
+            data.updatedAt ? new Date(data.updatedAt) : new Date(),
+          );
+        } catch (error) {
+          console.error("FETCH DASHBOARD OVERVIEW ERROR:", error);
+        } finally {
+          setRefreshing(false);
+        }
+      })();
 
-        setLastSynced(new Date());
+      dashboardRequestInFlightRef.current = requestPromise;
+
+      try {
+        await requestPromise;
       } finally {
-        setRefreshing(false);
+        if (dashboardRequestInFlightRef.current === requestPromise) {
+          dashboardRequestInFlightRef.current = null;
+        }
       }
     },
-    [fetchActiveSession, fetchDevice],
+    [],
   );
 
   /* =======================================================
@@ -437,11 +300,9 @@ export default function Home() {
   ======================================================= */
 
   const visiblePSBoxes = useMemo(() => {
-    return mockPSBoxes.filter((psbox) => {
-      const id = String(psbox.id).toUpperCase();
-
-      return devices[id]?.accessDenied !== true;
-    });
+    return Object.keys(devices)
+      .sort((a, b) => a.localeCompare(b))
+      .map((id) => ({ id }));
   }, [devices]);
 
   /* =======================================================
@@ -920,8 +781,13 @@ function UsageChart() {
   const [loadingChart, setLoadingChart] = useState(true);
 
   useEffect(() => {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
     const sessionsQuery = query(
       collection(db, "sessions"),
+      where("startedAt", ">=", sevenDaysAgo),
       orderBy("startedAt", "desc"),
     );
 

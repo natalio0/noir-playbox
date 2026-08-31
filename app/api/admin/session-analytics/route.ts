@@ -37,17 +37,34 @@ export async function GET(request: Request) {
       searchParams.get("cafeId") ??
       "all";
 
-    const [
-      sessionSnapshot,
-      cafeSnapshot,
-    ] = await Promise.all([
-      adminDb
-        .collection("sessions")
-        .get(),
+    const now = new Date();
 
-      adminDb
-        .collection("cafes")
-        .get(),
+    const range = getRange(
+      period,
+      now,
+    );
+
+    /*
+     * Jangan membaca seluruh collection sessions.
+     * Firestore langsung membatasi read ke periode yang diminta.
+     */
+    const sessionQuery = adminDb
+      .collection("sessions")
+      .where("startedAt", ">=", new Date(range.start))
+      .where("startedAt", "<=", new Date(range.end))
+      .select(
+        "deviceId",
+        "cafeId",
+        "status",
+        "startedAt",
+        "endedAt",
+        "totalMinutes",
+        "totalPrice",
+      );
+
+    const [sessionSnapshot, cafeSnapshot] = await Promise.all([
+      sessionQuery.get(),
+      adminDb.collection("cafes").get(),
     ]);
 
     const cafeMap = new Map(
@@ -102,13 +119,6 @@ export async function GET(request: Request) {
           ),
         };
       });
-
-    const now = new Date();
-
-    const range = getRange(
-      period,
-      now,
-    );
 
     const filtered = sessions
       .filter((session) => {
