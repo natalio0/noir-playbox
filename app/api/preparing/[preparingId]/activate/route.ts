@@ -3,6 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessCafe, canAccessSession } from "@/lib/session-access";
+import { deviceRuntimeRef } from "@/lib/device-runtime";
 
 export async function PATCH(
   request: Request,
@@ -74,12 +75,36 @@ export async function PATCH(
       );
     }
 
-    await ref.update({
+    const deviceId = String(data.deviceId ?? "").trim().toUpperCase();
+    const batch = adminDb.batch();
+
+    batch.update(ref, {
       status: "CONVERTED_TO_BILLING",
       billingSessionId,
       activatedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
+
+    if (deviceId) {
+      batch.set(
+        deviceRuntimeRef(deviceId),
+        {
+          schemaVersion: 1,
+          deviceId,
+          cafeId: data.cafeId ?? null,
+          preparingId: null,
+          preparingStartedAt: null,
+          activeSessionId: billingSessionId,
+          sessionStartedAt: billingData.startedAt ?? null,
+          sessionTotalMinutes: Number(billingData.totalMinutes ?? 0),
+          sessionTotalPrice: Number(billingData.totalPrice ?? 0),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    }
+
+    await batch.commit();
 
     return Response.json({ success: true });
   } catch (error) {

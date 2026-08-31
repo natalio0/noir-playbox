@@ -784,8 +784,12 @@ export default function PSDetailPage({
         method: "PATCH",
         cache: "no-store",
         headers: {
+          "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
+        body: JSON.stringify({
+          deviceId: rawDeviceId,
+        }),
       });
 
       const data = await response.json();
@@ -890,6 +894,7 @@ export default function PSDetailPage({
         Authorization: `Bearer ${idToken}`,
       },
       body: JSON.stringify({
+        deviceId: rawDeviceId,
         packageId: pkg.id,
         name: pkg.name,
         durationMinutes: pkg.durationMinutes,

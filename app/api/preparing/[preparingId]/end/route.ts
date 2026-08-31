@@ -3,6 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessCafe } from "@/lib/session-access";
+import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
 
 export async function PATCH(
   request: Request,
@@ -34,6 +35,14 @@ export async function PATCH(
       return Response.json({ success: true });
     }
 
+    const deviceId = String(data.deviceId ?? "").trim().toUpperCase();
+    const runtimeRef = deviceId ? deviceRuntimeRef(deviceId) : null;
+    const runtimeSnapshot = runtimeRef ? await runtimeRef.get() : null;
+    const runtime =
+      runtimeRef && runtimeSnapshot?.exists
+        ? parseDeviceRuntime(deviceId, runtimeSnapshot.data())
+        : null;
+
     const startedAtMs = data.startedAt?.toDate?.().getTime?.() ?? Date.now();
     const durationMinutes = Math.max(
       0,
@@ -55,6 +64,14 @@ export async function PATCH(
       riskLevel,
       updatedAt: FieldValue.serverTimestamp(),
     });
+
+    if (runtimeRef && runtime?.preparingId === preparingId) {
+      batch.update(runtimeRef, {
+        preparingId: null,
+        preparingStartedAt: null,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
 
     const auditRef = adminDb.collection("audit_logs").doc();
     batch.set(auditRef, {

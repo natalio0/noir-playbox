@@ -4,8 +4,9 @@ import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { resolveRentalPackage } from "@/lib/rental-packages";
-import { canAccessSession } from "@/lib/session-access";
+import { canAccessCafe, canAccessSession } from "@/lib/session-access";
 import { createPerfTrace } from "@/lib/perf-trace";
+import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
 
 export async function POST(
   request: NextRequest,
@@ -25,6 +26,7 @@ export async function POST(
     }
 
     const body = await trace.measure("requestJson", () => request.json());
+    const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
     const rentalPackage = resolveRentalPackage({
       packageId: body.packageId,
       name: body.name,
@@ -48,54 +50,134 @@ export async function POST(
 
     let newTotalMinutes = 0;
     let newTotalPrice = 0;
+    let fastPath = false;
 
     await trace.measure("firestoreTransaction", () =>
       adminDb.runTransaction(async (transaction) => {
-      const sessionSnapshot = await trace.measure("tx.sessionRead", () =>
-        transaction.get(sessionRef),
-      );
+        /* =====================================================
+           FAST PATH: runtime menjadi lock bersama ADD TIME/STOP.
+        ===================================================== */
+        if (deviceId) {
+          const runtimeRef = deviceRuntimeRef(deviceId);
+          const runtimeSnapshot = await trace.measure("tx.runtimeRead", () =>
+            transaction.get(runtimeRef),
+          );
+          const runtime = parseDeviceRuntime(deviceId, runtimeSnapshot.data());
 
-      if (!sessionSnapshot.exists) {
-        throw new Error("SESSION_NOT_FOUND");
-      }
+          if (runtime && runtime.activeSessionId === sessionId) {
+            if (!canAccessCafe(user, runtime.cafeId)) {
+              throw new Error("SESSION_FORBIDDEN");
+            }
 
-      const sessionData = sessionSnapshot.data();
+            newTotalMinutes =
+              runtime.sessionTotalMinutes + rentalPackage.durationMinutes;
+            newTotalPrice = runtime.sessionTotalPrice + rentalPackage.price;
 
-      if (!sessionData) {
-        throw new Error("SESSION_NOT_FOUND");
-      }
+            transaction.set(packageRef, {
+              packageId: rentalPackage.id,
+              name: rentalPackage.name,
+              durationMinutes: rentalPackage.durationMinutes,
+              durationSeconds: rentalPackage.durationMinutes * 60,
+              price: rentalPackage.price,
+              type: "ADD_TIME",
+              addedAt: now,
+            });
 
-      if (!canAccessSession(user, sessionData)) {
-        throw new Error("SESSION_FORBIDDEN");
-      }
+            transaction.update(sessionRef, {
+              totalMinutes: newTotalMinutes,
+              totalPrice: newTotalPrice,
+              updatedAt: now,
+            });
 
-      if (sessionData.status !== "ACTIVE") {
-        throw new Error("SESSION_NOT_ACTIVE");
-      }
+            transaction.set(
+              runtimeRef,
+              {
+                sessionTotalMinutes: newTotalMinutes,
+                sessionTotalPrice: newTotalPrice,
+                updatedAt: now,
+              },
+              { merge: true },
+            );
 
-      newTotalMinutes =
-        Number(sessionData.totalMinutes ?? 0) + rentalPackage.durationMinutes;
-      newTotalPrice = Number(sessionData.totalPrice ?? 0) + rentalPackage.price;
+            fastPath = true;
+            return;
+          }
 
-      transaction.set(packageRef, {
-        packageId: rentalPackage.id,
-        name: rentalPackage.name,
-        durationMinutes: rentalPackage.durationMinutes,
-        durationSeconds: rentalPackage.durationMinutes * 60,
-        price: rentalPackage.price,
-        type: "ADD_TIME",
-        addedAt: now,
-      });
+          if (runtime && runtime.activeSessionId !== sessionId) {
+            throw new Error("SESSION_NOT_ACTIVE");
+          }
+        }
 
-      transaction.update(sessionRef, {
-        totalMinutes: newTotalMinutes,
-        totalPrice: newTotalPrice,
-        updatedAt: now,
-      });
-    }),
+        /* =====================================================
+           LEGACY FALLBACK
+        ===================================================== */
+        const sessionSnapshot = await trace.measure("tx.legacySessionRead", () =>
+          transaction.get(sessionRef),
+        );
+
+        if (!sessionSnapshot.exists) {
+          throw new Error("SESSION_NOT_FOUND");
+        }
+
+        const sessionData = sessionSnapshot.data();
+
+        if (!sessionData) {
+          throw new Error("SESSION_NOT_FOUND");
+        }
+
+        if (!canAccessSession(user, sessionData)) {
+          throw new Error("SESSION_FORBIDDEN");
+        }
+
+        if (sessionData.status !== "ACTIVE") {
+          throw new Error("SESSION_NOT_ACTIVE");
+        }
+
+        const resolvedDeviceId = String(sessionData.deviceId ?? "")
+          .trim()
+          .toUpperCase();
+        const cafeId = String(sessionData.cafeId ?? "").trim();
+
+        newTotalMinutes =
+          Number(sessionData.totalMinutes ?? 0) + rentalPackage.durationMinutes;
+        newTotalPrice = Number(sessionData.totalPrice ?? 0) + rentalPackage.price;
+
+        transaction.set(packageRef, {
+          packageId: rentalPackage.id,
+          name: rentalPackage.name,
+          durationMinutes: rentalPackage.durationMinutes,
+          durationSeconds: rentalPackage.durationMinutes * 60,
+          price: rentalPackage.price,
+          type: "ADD_TIME",
+          addedAt: now,
+        });
+
+        transaction.update(sessionRef, {
+          totalMinutes: newTotalMinutes,
+          totalPrice: newTotalPrice,
+          updatedAt: now,
+        });
+
+        if (resolvedDeviceId && cafeId) {
+          transaction.set(
+            deviceRuntimeRef(resolvedDeviceId),
+            {
+              schemaVersion: 1,
+              deviceId: resolvedDeviceId,
+              cafeId,
+              activeSessionId: sessionId,
+              sessionStartedAt: sessionData.startedAt ?? null,
+              sessionTotalMinutes: newTotalMinutes,
+              sessionTotalPrice: newTotalPrice,
+              updatedAt: now,
+            },
+            { merge: true },
+          );
+        }
+      }),
     );
 
-    trace.finish("ok");
+    trace.finish("ok", { fastPath });
 
     return NextResponse.json({
       success: true,

@@ -4,6 +4,7 @@ import {
   resolveRegisteredDevice,
 } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
 
 export async function GET(request: Request) {
   try {
@@ -20,7 +21,10 @@ export async function GET(request: Request) {
       );
     }
 
-    const registered = await resolveRegisteredDevice(deviceId);
+    const [registered, runtimeSnapshot] = await Promise.all([
+      resolveRegisteredDevice(deviceId),
+      deviceRuntimeRef(deviceId).get(),
+    ]);
 
     if (!registered || !registered.active) {
       return Response.json(
@@ -34,6 +38,30 @@ export async function GET(request: Request) {
         { success: false, error: "Tidak memiliki akses ke PlayBox ini" },
         { status: 403 },
       );
+    }
+
+    const runtime = parseDeviceRuntime(deviceId, runtimeSnapshot.data());
+
+    if (runtime) {
+      if (!runtime.preparingId) {
+        return Response.json({ success: true, active: false, preparing: null });
+      }
+
+      return Response.json({
+        success: true,
+        active: true,
+        preparing: {
+          id: runtime.preparingId,
+          deviceId,
+          status: "PREPARING",
+          startedAt:
+            runtime.preparingStartedAt?.toDate?.().toISOString?.() ?? null,
+          activatedAt: null,
+          endedAt: null,
+          billingSessionId: null,
+          operatorUid: null,
+        },
+      });
     }
 
     const snapshot = await adminDb

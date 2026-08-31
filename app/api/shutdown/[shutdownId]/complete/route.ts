@@ -4,6 +4,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { canAccessCafe } from "@/lib/session-access";
 import { createPerfTrace } from "@/lib/perf-trace";
+import { deviceRuntimeRef } from "@/lib/device-runtime";
 
 export async function PATCH(
   request: Request,
@@ -99,6 +100,25 @@ export async function PATCH(
       durationMinutes,
       updatedAt: now,
     });
+
+    const deviceId = String(data.deviceId ?? "").trim().toUpperCase();
+
+    if (deviceId) {
+      batch.set(
+        deviceRuntimeRef(deviceId),
+        {
+          schemaVersion: 1,
+          deviceId,
+          cafeId: typeof data.cafeId === "string" ? data.cafeId : null,
+          shutdownId: null,
+          shutdownStatus: null,
+          shutdownStartedAt: null,
+          sourceSessionId: null,
+          updatedAt: now,
+        },
+        { merge: true },
+      );
+    }
 
     const auditRef = adminDb.collection("audit_logs").doc();
     batch.set(auditRef, {

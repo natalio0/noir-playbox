@@ -4,6 +4,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { invalidateRegisteredDeviceCache } from "@/lib/device-registry";
 import { getRawTuyaDevice } from "@/lib/tuya-raw";
+import { createEmptyDeviceRuntime, deviceRuntimeRef } from "@/lib/device-runtime";
 
 export async function POST(
   request: Request,
@@ -152,7 +153,9 @@ export async function POST(
         tuyaDeviceId,
       );
 
-    await ref.set({
+    const batch = adminDb.batch();
+
+    batch.set(ref, {
       deviceId,
       name:
         name ||
@@ -174,6 +177,13 @@ export async function POST(
       updatedAt:
         FieldValue.serverTimestamp(),
     });
+
+    batch.set(
+      deviceRuntimeRef(deviceId),
+      createEmptyDeviceRuntime(deviceId, cafeId),
+    );
+
+    await batch.commit();
 
     invalidateRegisteredDeviceCache();
 

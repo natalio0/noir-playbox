@@ -30,84 +30,79 @@ const registryListCache = new Map<
   { expiresAt: number; devices: ListedRegisteredDevice[] }
 >();
 
+const registryDeviceCache = new Map<
+  string,
+  { expiresAt: number; device: RegisteredDevice | null }
+>();
+
 const REGISTRY_CACHE_MS = 30_000;
+const REGISTRY_DEVICE_CACHE_MS = 30_000;
 
 export function invalidateRegisteredDeviceCache() {
   registryListCache.clear();
+  registryDeviceCache.clear();
 }
 
 export async function resolveRegisteredDevice(
   logicalDeviceId: string,
 ): Promise<RegisteredDevice | null> {
-  const deviceId =
-    logicalDeviceId.trim().toUpperCase();
+  const deviceId = logicalDeviceId.trim().toUpperCase();
+  const cached = registryDeviceCache.get(deviceId);
 
-  const snapshot =
-    await adminDb
-      .collection("devices")
-      .doc(deviceId)
-      .get();
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.device;
+  }
+
+  const snapshot = await adminDb.collection("devices").doc(deviceId).get();
+
+  let resolved: RegisteredDevice | null = null;
 
   if (snapshot.exists) {
     const data = snapshot.data()!;
-
-    const tuyaDeviceId =
-      String(
-        data.tuyaDeviceId ?? "",
-      ).trim();
+    const tuyaDeviceId = String(data.tuyaDeviceId ?? "").trim();
 
     if (tuyaDeviceId) {
-      return {
+      resolved = {
         deviceId,
-        name: String(
-          data.name ?? deviceId,
-        ),
-        cafeId:
-          typeof data.cafeId === "string"
-            ? data.cafeId
-            : null,
+        name: String(data.name ?? deviceId),
+        cafeId: typeof data.cafeId === "string" ? data.cafeId : null,
         tuyaDeviceId,
-        active:
-          data.active !== false,
-        brand:
-          data.brand
-            ? String(data.brand)
-            : null,
-        model:
-          data.model
-            ? String(data.model)
-            : null,
-        type:
-          data.type
-            ? String(data.type)
-            : null,
+        active: data.active !== false,
+        brand: data.brand ? String(data.brand) : null,
+        model: data.model ? String(data.model) : null,
+        type: data.type ? String(data.type) : null,
       };
     }
   }
 
-  /*
-   * Temporary backward compatibility only.
-   * PS01-PS05 tetap bisa bekerja jika salah satu dokumen
-   * Firestore belum memiliki tuyaDeviceId.
-   */
-  const legacy =
-    TUYA_DEVICES[deviceId];
+  if (!resolved) {
+    /*
+     * Temporary backward compatibility only.
+     * PS01-PS05 tetap bisa bekerja jika salah satu dokumen
+     * Firestore belum memiliki tuyaDeviceId.
+     */
+    const legacy = TUYA_DEVICES[deviceId];
 
-  if (!legacy) {
-    return null;
+    if (legacy) {
+      resolved = {
+        deviceId,
+        name: legacy.name,
+        cafeId: null,
+        tuyaDeviceId: legacy.deviceId,
+        active: true,
+        brand: "BARDI",
+        model: "Smart Plug",
+        type: "SMART_PLUG",
+      };
+    }
   }
 
-  return {
-    deviceId,
-    name: legacy.name,
-    cafeId: null,
-    tuyaDeviceId:
-      legacy.deviceId,
-    active: true,
-    brand: "BARDI",
-    model: "Smart Plug",
-    type: "SMART_PLUG",
-  };
+  registryDeviceCache.set(deviceId, {
+    expiresAt: Date.now() + REGISTRY_DEVICE_CACHE_MS,
+    device: resolved,
+  });
+
+  return resolved;
 }
 
 export async function listRegisteredDevicesForUser(

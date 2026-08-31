@@ -4,10 +4,9 @@ import {
   resolveRegisteredDevice,
 } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
 
-function serializeShutdown(
-  doc: FirebaseFirestore.QueryDocumentSnapshot,
-) {
+function serializeShutdown(doc: FirebaseFirestore.QueryDocumentSnapshot) {
   const data = doc.data();
 
   return {
@@ -36,7 +35,10 @@ export async function GET(request: Request) {
       );
     }
 
-    const registered = await resolveRegisteredDevice(deviceId);
+    const [registered, runtimeSnapshot] = await Promise.all([
+      resolveRegisteredDevice(deviceId),
+      deviceRuntimeRef(deviceId).get(),
+    ]);
 
     if (!registered || !registered.active) {
       return Response.json(
@@ -52,10 +54,29 @@ export async function GET(request: Request) {
       );
     }
 
-    /*
-     * ACTIVE diprioritaskan. Jika tidak ada, restore PENDING.
-     * Dua query jalan paralel supaya refresh detail tetap cepat.
-     */
+    const runtime = parseDeviceRuntime(deviceId, runtimeSnapshot.data());
+
+    if (runtime) {
+      if (!runtime.shutdownId || !runtime.shutdownStatus) {
+        return Response.json({ success: true, active: false, shutdown: null });
+      }
+
+      return Response.json({
+        success: true,
+        active: true,
+        shutdown: {
+          id: runtime.shutdownId,
+          deviceId,
+          status: runtime.shutdownStatus,
+          startedAt:
+            runtime.shutdownStartedAt?.toDate?.().toISOString?.() ?? null,
+          endedAt: null,
+          operatorUid: null,
+          sourceSessionId: runtime.sourceSessionId,
+        },
+      });
+    }
+
     const [activeSnapshot, pendingSnapshot] = await Promise.all([
       adminDb
         .collection("shutdown_sessions")
@@ -88,8 +109,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error("GET ACTIVE SHUTDOWN ERROR:", error);
-    const message =
-      error instanceof Error ? error.message : "Internal server error";
+    const message = error instanceof Error ? error.message : "Internal server error";
 
     return Response.json(
       {

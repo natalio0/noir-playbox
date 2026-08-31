@@ -1,6 +1,7 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { resolveRegisteredDevice } from "@/lib/device-registry";
+import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
 import {
   getDynamicTuyaState,
   sendTuyaStandardCommands,
@@ -158,6 +159,12 @@ async function finalizeViolation(
 ) {
   const preparingRef = adminDb.collection("preparing_sessions").doc(preparingId);
   const auditRef = adminDb.collection("audit_logs").doc();
+  const runtimeRef = claimed.deviceId ? deviceRuntimeRef(claimed.deviceId) : null;
+  const runtimeSnapshot = runtimeRef ? await runtimeRef.get() : null;
+  const runtime =
+    runtimeRef && runtimeSnapshot?.exists
+      ? parseDeviceRuntime(claimed.deviceId, runtimeSnapshot.data())
+      : null;
   const batch = adminDb.batch();
 
   batch.update(preparingRef, {
@@ -174,6 +181,14 @@ async function finalizeViolation(
     autoShutdownCompletedAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   });
+
+  if (runtimeRef && runtime?.preparingId === preparingId) {
+    batch.update(runtimeRef, {
+      preparingId: null,
+      preparingStartedAt: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  }
 
   batch.set(auditRef, {
     type: "PREPARING_SUSPICIOUS_AUTO_SHUTDOWN",
