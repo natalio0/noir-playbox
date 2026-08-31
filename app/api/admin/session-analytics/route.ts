@@ -45,6 +45,50 @@ export async function GET(request: Request) {
     );
 
     /*
+     * History UI hanya menampilkan 150 session terbaru. Jangan membaca seluruh
+     * histori sejak 2020 lalu memotongnya di memory.
+     */
+    if (period === "history" && cafeFilter === "all") {
+      const historySnapshot = await adminDb
+        .collection("sessions")
+        .orderBy("startedAt", "desc")
+        .limit(150)
+        .select(
+          "deviceId",
+          "cafeId",
+          "status",
+          "startedAt",
+          "endedAt",
+          "totalMinutes",
+          "totalPrice",
+        )
+        .get();
+
+      const historySessions: SessionRow[] = historySnapshot.docs.map((doc) => {
+        const data = doc.data();
+
+        return {
+          id: doc.id,
+          deviceId: String(data.deviceId ?? "-").toUpperCase(),
+          cafeId: data.cafeId ? String(data.cafeId) : null,
+          status: data.status === "ACTIVE" ? "ACTIVE" : "COMPLETED",
+          startedAt: toIso(data.startedAt),
+          endedAt: toIso(data.endedAt),
+          totalMinutes: Number(data.totalMinutes ?? 0),
+          totalPrice: Number(data.totalPrice ?? 0),
+        };
+      });
+
+      return Response.json({
+        success: true,
+        period,
+        cafeFilter,
+        sessions: historySessions,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+
+    /*
      * Jangan membaca seluruh collection sessions.
      * Firestore langsung membatasi read ke periode yang diminta.
      */

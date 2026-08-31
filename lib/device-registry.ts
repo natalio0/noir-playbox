@@ -12,6 +12,30 @@ export type RegisteredDevice = {
   type: string | null;
 };
 
+export type ListedRegisteredDevice = {
+  id: string;
+  deviceId: string;
+  name: string;
+  cafeId: string | null;
+  cafeName: string | null;
+  tuyaDeviceId: string | null;
+  active: boolean;
+  brand: string | null;
+  model: string | null;
+  type: string | null;
+};
+
+const registryListCache = new Map<
+  string,
+  { expiresAt: number; devices: ListedRegisteredDevice[] }
+>();
+
+const REGISTRY_CACHE_MS = 30_000;
+
+export function invalidateRegisteredDeviceCache() {
+  registryListCache.clear();
+}
+
 export async function resolveRegisteredDevice(
   logicalDeviceId: string,
 ): Promise<RegisteredDevice | null> {
@@ -91,7 +115,9 @@ export async function listRegisteredDevicesForUser(
     | Record<string, unknown>
     | null
     | undefined,
-) {
+  options: { includeCafeNames?: boolean } = {},
+): Promise<ListedRegisteredDevice[]> {
+  const includeCafeNames = options.includeCafeNames !== false;
   const role =
     typeof profile?.role ===
     "string"
@@ -103,6 +129,13 @@ export async function listRegisteredDevicesForUser(
     "string"
       ? profile.cafeId
       : null;
+
+  const cacheKey = `${role}:${profileCafeId ?? "-"}:${includeCafeNames ? "names" : "no-names"}`;
+  const cached = registryListCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.devices;
+  }
 
   let query:
     FirebaseFirestore.Query =
@@ -149,15 +182,16 @@ export async function listRegisteredDevicesForUser(
       ),
     );
 
-  const cafeDocs =
-    await Promise.all(
-      cafeIds.map((id) =>
-        adminDb
-          .collection("cafes")
-          .doc(id)
-          .get(),
-      ),
-    );
+  const cafeDocs = includeCafeNames
+    ? await Promise.all(
+        cafeIds.map((id) =>
+          adminDb
+            .collection("cafes")
+            .doc(id)
+            .get(),
+        ),
+      )
+    : [];
 
   const cafeNames =
     new Map<string, string>();
@@ -179,7 +213,7 @@ export async function listRegisteredDevicesForUser(
     );
   }
 
-  return snapshot.docs
+  const devices = snapshot.docs
     .map((doc) => {
       const data =
         doc.data();
@@ -205,11 +239,8 @@ export async function listRegisteredDevicesForUser(
         ),
         cafeId,
         cafeName:
-          cafeId
-            ? cafeNames.get(
-                cafeId,
-              ) ??
-              cafeId
+          includeCafeNames && cafeId
+            ? cafeNames.get(cafeId) ?? cafeId
             : null,
         tuyaDeviceId:
           typeof data.tuyaDeviceId ===
@@ -264,6 +295,13 @@ export async function listRegisteredDevicesForUser(
         b.deviceId,
       );
     });
+
+  registryListCache.set(cacheKey, {
+    expiresAt: Date.now() + REGISTRY_CACHE_MS,
+    devices,
+  });
+
+  return devices;
 }
 
 export function canAccessDevice(

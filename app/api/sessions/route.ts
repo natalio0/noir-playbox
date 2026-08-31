@@ -2,225 +2,148 @@ import { FieldValue } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { resolveRentalPackage } from "@/lib/rental-packages";
 
 export async function POST(request: Request) {
   try {
     const user = await requireUserFromRequest(request);
-
     const body = await request.json();
 
-    const deviceId =
-      String(
-        body.deviceId || "",
-      )
-        .trim()
-        .toUpperCase();
-
-    const durationMinutes =
-      Number(
-        body.durationMinutes ?? 0,
-      );
-
-    const durationSeconds =
-      Number(
-        body.durationSeconds ??
-          durationMinutes * 60,
-      );
-
-    const packageName =
-      String(
-        body.packageName || "",
-      ).trim();
-
-    const price =
-      Number(
-        body.price ?? 0,
-      );
+    const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
+    const rentalPackage = resolveRentalPackage({
+      packageId: body.packageId,
+      name: body.packageName,
+      durationMinutes: body.durationMinutes,
+      price: body.price,
+    });
 
     if (!deviceId) {
       return Response.json(
+        { success: false, error: "deviceId wajib diisi" },
+        { status: 400 },
+      );
+    }
+
+    if (!rentalPackage) {
+      return Response.json(
         {
           success: false,
-          error:
-            "deviceId wajib diisi",
+          error: "Paket rental tidak valid. Gunakan paket resmi Noir Playbox.",
         },
         { status: 400 },
       );
     }
 
-    const deviceDoc =
-      await adminDb
-        .collection("devices")
-        .doc(deviceId)
-        .get();
+    const deviceRef = adminDb.collection("devices").doc(deviceId);
+    const sessionRef = adminDb.collection("sessions").doc();
+    const packageRef = sessionRef.collection("packages").doc();
 
-    if (!deviceDoc.exists) {
+    let cafeId = "";
+
+    await adminDb.runTransaction(async (transaction) => {
+      const deviceDoc = await transaction.get(deviceRef);
+
+      if (!deviceDoc.exists) {
+        throw new Error("DEVICE_NOT_FOUND");
+      }
+
+      const deviceData = deviceDoc.data()!;
+      cafeId = typeof deviceData.cafeId === "string" ? deviceData.cafeId : "";
+
+      if (!cafeId) {
+        throw new Error("DEVICE_CAFE_MISSING");
+      }
+
+      if (
+        user.profile?.role === "operational" &&
+        user.profile?.cafeId !== cafeId
+      ) {
+        throw new Error("DEVICE_FORBIDDEN");
+      }
+
+      /*
+       * Query ACTIVE dijalankan di transaction agar dua request START yang
+       * datang bersamaan tidak sama-sama lolos pengecekan.
+       */
+      const activeQuery = adminDb
+        .collection("sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "ACTIVE")
+        .limit(1);
+
+      const activeSnapshot = await transaction.get(activeQuery);
+
+      if (!activeSnapshot.empty) {
+        throw new Error("SESSION_ACTIVE");
+      }
+
+      transaction.set(sessionRef, {
+        deviceId,
+        cafeId,
+        status: "ACTIVE",
+        startedAt: FieldValue.serverTimestamp(),
+        endedAt: null,
+        totalMinutes: rentalPackage.durationMinutes,
+        totalPrice: rentalPackage.price,
+        operatorUid: user.uid,
+        operatorEmail: user.email ?? null,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      transaction.set(packageRef, {
+        packageId: rentalPackage.id,
+        name: rentalPackage.name,
+        durationMinutes: rentalPackage.durationMinutes,
+        durationSeconds: rentalPackage.durationMinutes * 60,
+        price: rentalPackage.price,
+        type: "INITIAL",
+        addedAt: FieldValue.serverTimestamp(),
+      });
+    });
+
+    return Response.json({
+      success: true,
+      sessionId: sessionRef.id,
+      cafeId,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Gagal membuat session";
+
+    if (message === "DEVICE_NOT_FOUND") {
       return Response.json(
-        {
-          success: false,
-          error:
-            `${deviceId} belum terdaftar di collection devices`,
-        },
+        { success: false, error: "PlayBox belum terdaftar" },
         { status: 400 },
       );
     }
 
-    const deviceData =
-      deviceDoc.data()!;
-
-    const cafeId =
-      typeof deviceData.cafeId ===
-        "string"
-        ? deviceData.cafeId
-        : "";
-
-    if (!cafeId) {
+    if (message === "DEVICE_CAFE_MISSING") {
       return Response.json(
-        {
-          success: false,
-          error:
-            `${deviceId} belum memiliki cafeId`,
-        },
+        { success: false, error: "PlayBox belum memiliki cafeId" },
         { status: 400 },
       );
     }
 
-    if (
-      user.profile?.role ===
-        "operational" &&
-      user.profile?.cafeId !==
-        cafeId
-    ) {
+    if (message === "DEVICE_FORBIDDEN") {
       return Response.json(
-        {
-          success: false,
-          error:
-            "Operational tidak memiliki akses ke cafe device ini",
-        },
+        { success: false, error: "Tidak memiliki akses ke PlayBox ini" },
         { status: 403 },
       );
     }
 
-    const activeSnapshot =
-      await adminDb
-        .collection("sessions")
-        .where(
-          "deviceId",
-          "==",
-          deviceId,
-        )
-        .where(
-          "status",
-          "==",
-          "ACTIVE",
-        )
-        .limit(1)
-        .get();
-
-    if (
-      !activeSnapshot.empty
-    ) {
+    if (message === "SESSION_ACTIVE") {
       return Response.json(
-        {
-          success: false,
-          error:
-            `${deviceId} masih memiliki session ACTIVE`,
-        },
+        { success: false, error: "PlayBox masih memiliki session ACTIVE" },
         { status: 409 },
       );
     }
 
-    const sessionRef =
-      adminDb
-        .collection("sessions")
-        .doc();
-
-    const packageRef =
-      sessionRef
-        .collection("packages")
-        .doc();
-
-    const batch =
-      adminDb.batch();
-
-    batch.set(
-      sessionRef,
-      {
-        deviceId,
-        cafeId,
-
-        status: "ACTIVE",
-
-        startedAt:
-          FieldValue
-            .serverTimestamp(),
-
-        endedAt: null,
-
-        totalMinutes:
-          durationMinutes,
-
-        totalPrice:
-          price,
-
-        operatorUid:
-          user.uid,
-
-        operatorEmail:
-          user.email ?? null,
-
-        createdAt:
-          FieldValue
-            .serverTimestamp(),
-
-        updatedAt:
-          FieldValue
-            .serverTimestamp(),
-      },
-    );
-
-    batch.set(
-      packageRef,
-      {
-        name: packageName,
-        durationMinutes,
-        durationSeconds,
-        price,
-        type: "INITIAL",
-        addedAt:
-          FieldValue
-            .serverTimestamp(),
-      },
-    );
-
-    await batch.commit();
-
-    return Response.json({
-      success: true,
-      sessionId:
-        sessionRef.id,
-      cafeId,
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Gagal membuat session";
-
     return Response.json(
       {
         success: false,
-        error:
-          message === "UNAUTHORIZED"
-            ? "Unauthorized"
-            : message,
+        error: message === "UNAUTHORIZED" ? "Unauthorized" : message,
       },
-      {
-        status:
-          message === "UNAUTHORIZED"
-            ? 401
-            : 500,
-      },
+      { status: message === "UNAUTHORIZED" ? 401 : 500 },
     );
   }
 }

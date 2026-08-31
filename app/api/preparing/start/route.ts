@@ -1,18 +1,45 @@
 import { FieldValue } from "firebase-admin/firestore";
+
 import { adminDb } from "@/lib/firebase-admin";
+import {
+  canAccessDevice,
+  resolveRegisteredDevice,
+} from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 
 export async function POST(request: Request) {
   try {
     const user = await requireUserFromRequest(request);
-
     const body = await request.json();
-    const deviceId = String(body.deviceId || "").toUpperCase();
+    const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
 
     if (!deviceId) {
       return Response.json(
         { success: false, error: "deviceId wajib diisi" },
         { status: 400 },
+      );
+    }
+
+    const registered = await resolveRegisteredDevice(deviceId);
+
+    if (!registered || !registered.active) {
+      return Response.json(
+        { success: false, error: "PlayBox tidak ditemukan" },
+        { status: 404 },
+      );
+    }
+
+    if (!canAccessDevice(user.profile, registered)) {
+      return Response.json(
+        { success: false, error: "Tidak memiliki akses ke PlayBox ini" },
+        { status: 403 },
+      );
+    }
+
+    if (!registered.cafeId) {
+      return Response.json(
+        { success: false, error: "PlayBox belum memiliki cafeId" },
+        { status: 409 },
       );
     }
 
@@ -46,17 +73,14 @@ export async function POST(request: Request) {
 
     await ref.set({
       deviceId,
+      cafeId: registered.cafeId,
       status: "PREPARING",
       startedAt: FieldValue.serverTimestamp(),
       activatedAt: null,
       endedAt: null,
       billingSessionId: null,
-
       operatorUid: user.uid,
       operatorEmail: user.email,
-
-      cafeId: user.profile?.cafeId ?? null,
-
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -79,15 +103,10 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("START PREPARING ERROR:", error);
-
-    const message =
-      error instanceof Error ? error.message : "Internal server error";
+    const message = error instanceof Error ? error.message : "Internal server error";
 
     return Response.json(
-      {
-        success: false,
-        error: message === "UNAUTHORIZED" ? "Unauthorized" : message,
-      },
+      { success: false, error: message === "UNAUTHORIZED" ? "Unauthorized" : message },
       { status: message === "UNAUTHORIZED" ? 401 : 500 },
     );
   }

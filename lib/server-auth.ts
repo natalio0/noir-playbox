@@ -55,11 +55,6 @@ export async function getAuthenticatedUser(
 
     const decodedToken = await adminAuth.verifyIdToken(idToken);
 
-    console.log("=================================");
-    console.log("🔥 AUTHENTICATED USER");
-    console.log("UID:", decodedToken.uid);
-    console.log("EMAIL:", decodedToken.email);
-    console.log("=================================");
 
     /* =====================================================
        GET USER PROFILE FROM FIRESTORE
@@ -123,14 +118,6 @@ export async function getAuthenticatedUser(
        DEBUG
     ===================================================== */
 
-    console.log("=================================");
-    console.log("🔥 USER PROFILE");
-    console.log("UID:", user.uid);
-    console.log("NAME:", user.name);
-    console.log("EMAIL:", user.email);
-    console.log("ROLE:", user.role);
-    console.log("CAFE ID:", user.cafeId);
-    console.log("=================================");
 
     return user;
   } catch (error) {

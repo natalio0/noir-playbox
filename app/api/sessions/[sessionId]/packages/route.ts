@@ -1,256 +1,148 @@
 import { NextRequest, NextResponse } from "next/server";
+import { FieldValue } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
+import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { resolveRentalPackage } from "@/lib/rental-packages";
+import { canAccessSession } from "@/lib/session-access";
 
 export async function POST(
   request: NextRequest,
-  context: {
-    params: Promise<{
-      sessionId: string;
-    }>;
-  },
+  context: { params: Promise<{ sessionId: string }> },
 ) {
   try {
+    const user = await requireUserFromRequest(request);
     const { sessionId } = await context.params;
-
-    /* =====================================================
-       VALIDATION
-    ===================================================== */
 
     if (!sessionId) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "sessionId wajib diisi",
-        },
-        {
-          status: 400,
-        },
+        { success: false, error: "sessionId wajib diisi" },
+        { status: 400 },
       );
     }
 
     const body = await request.json();
+    const rentalPackage = resolveRentalPackage({
+      packageId: body.packageId,
+      name: body.name,
+      durationMinutes: body.durationMinutes,
+      price: body.price,
+    });
 
-    const { name, durationMinutes, durationSeconds, price } = body;
-
-    if (!name) {
+    if (!rentalPackage) {
       return NextResponse.json(
         {
           success: false,
-          error: "name wajib diisi",
+          error: "Paket tambahan tidak valid. Gunakan paket resmi Noir Playbox.",
         },
-        {
-          status: 400,
-        },
+        { status: 400 },
       );
     }
-
-    if (
-      durationMinutes === undefined ||
-      !Number.isFinite(Number(durationMinutes)) ||
-      Number(durationMinutes) <= 0
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "durationMinutes tidak valid",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    if (
-      price === undefined ||
-      !Number.isFinite(Number(price)) ||
-      Number(price) < 0
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "price tidak valid",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    /* =====================================================
-       CHECK SESSION
-    ===================================================== */
 
     const sessionRef = adminDb.collection("sessions").doc(sessionId);
+    const packageRef = sessionRef.collection("packages").doc();
+    const now = FieldValue.serverTimestamp();
 
-    const sessionSnapshot = await sessionRef.get();
+    let newTotalMinutes = 0;
+    let newTotalPrice = 0;
 
-    if (!sessionSnapshot.exists) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Session tidak ditemukan",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
+    await adminDb.runTransaction(async (transaction) => {
+      const sessionSnapshot = await transaction.get(sessionRef);
 
-    const sessionData = sessionSnapshot.data();
+      if (!sessionSnapshot.exists) {
+        throw new Error("SESSION_NOT_FOUND");
+      }
 
-    if (!sessionData) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Data session tidak ditemukan",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
+      const sessionData = sessionSnapshot.data();
 
-    /* =====================================================
-       SESSION HARUS ACTIVE
-    ===================================================== */
+      if (!sessionData) {
+        throw new Error("SESSION_NOT_FOUND");
+      }
 
-    if (sessionData.status !== "ACTIVE") {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Session sudah tidak aktif",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
+      if (!canAccessSession(user, sessionData)) {
+        throw new Error("SESSION_FORBIDDEN");
+      }
 
-    /* =====================================================
-       CREATE PACKAGE
-       
-       sessions/{sessionId}/packages/{packageId}
-    ===================================================== */
+      if (sessionData.status !== "ACTIVE") {
+        throw new Error("SESSION_NOT_ACTIVE");
+      }
 
-    const now = new Date();
+      newTotalMinutes =
+        Number(sessionData.totalMinutes ?? 0) + rentalPackage.durationMinutes;
+      newTotalPrice = Number(sessionData.totalPrice ?? 0) + rentalPackage.price;
 
-    const packageRef = await sessionRef.collection("packages").add({
-      name: String(name),
+      transaction.set(packageRef, {
+        packageId: rentalPackage.id,
+        name: rentalPackage.name,
+        durationMinutes: rentalPackage.durationMinutes,
+        durationSeconds: rentalPackage.durationMinutes * 60,
+        price: rentalPackage.price,
+        type: "ADD_TIME",
+        addedAt: now,
+      });
 
-      durationMinutes: Number(durationMinutes),
-
-      durationSeconds:
-        durationSeconds !== undefined
-          ? Number(durationSeconds)
-          : Number(durationMinutes) * 60,
-
-      price: Number(price),
-
-      type: "ADD_TIME",
-
-      addedAt: now,
+      transaction.update(sessionRef, {
+        totalMinutes: newTotalMinutes,
+        totalPrice: newTotalPrice,
+        updatedAt: now,
+      });
     });
-
-    /* =====================================================
-       UPDATE SESSION TOTAL
-    ===================================================== */
-
-    const currentTotalMinutes = Number(sessionData.totalMinutes ?? 0);
-
-    const currentTotalPrice = Number(sessionData.totalPrice ?? 0);
-
-    const newTotalMinutes = currentTotalMinutes + Number(durationMinutes);
-
-    const newTotalPrice = currentTotalPrice + Number(price);
-
-    await sessionRef.update({
-      totalMinutes: newTotalMinutes,
-
-      totalPrice: newTotalPrice,
-
-      updatedAt: now,
-    });
-
-    /* =====================================================
-       LOG
-    ===================================================== */
-
-    console.log("=================================");
-
-    console.log("🔥 PACKAGE ADDED");
-
-    console.log("SESSION:", sessionId);
-
-    console.log("PACKAGE:", packageRef.id);
-
-    console.log("NAME:", name);
-
-    console.log("DURATION:", Number(durationMinutes), "minutes");
-
-    console.log("PRICE:", Number(price));
-
-    console.log("TOTAL MINUTES:", newTotalMinutes);
-
-    console.log("TOTAL PRICE:", newTotalPrice);
-
-    console.log("=================================");
-
-    /* =====================================================
-       RESPONSE
-    ===================================================== */
 
     return NextResponse.json({
       success: true,
-
       sessionId,
-
       packageId: packageRef.id,
-
       package: {
         id: packageRef.id,
-
-        name: String(name),
-
-        durationMinutes: Number(durationMinutes),
-
-        durationSeconds:
-          durationSeconds !== undefined
-            ? Number(durationSeconds)
-            : Number(durationMinutes) * 60,
-
-        price: Number(price),
-
+        packageId: rentalPackage.id,
+        name: rentalPackage.name,
+        durationMinutes: rentalPackage.durationMinutes,
+        durationSeconds: rentalPackage.durationMinutes * 60,
+        price: rentalPackage.price,
         type: "ADD_TIME",
-
-        addedAt: now.toISOString(),
+        addedAt: new Date().toISOString(),
       },
-
       session: {
         totalMinutes: newTotalMinutes,
-
         totalPrice: newTotalPrice,
       },
     });
   } catch (error) {
-    console.error("=================================");
+    const message = error instanceof Error ? error.message : "Gagal menyimpan package";
 
-    console.error("🔥 ADD PACKAGE ERROR");
+    if (message === "UNAUTHORIZED") {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 },
+      );
+    }
 
-    console.error(error);
+    if (message === "SESSION_FORBIDDEN") {
+      return NextResponse.json(
+        { success: false, error: "Tidak memiliki akses ke session ini" },
+        { status: 403 },
+      );
+    }
 
-    console.error("=================================");
+    if (message === "SESSION_NOT_FOUND") {
+      return NextResponse.json(
+        { success: false, error: "Session tidak ditemukan" },
+        { status: 404 },
+      );
+    }
+
+    if (message === "SESSION_NOT_ACTIVE") {
+      return NextResponse.json(
+        { success: false, error: "Session sudah tidak aktif" },
+        { status: 409 },
+      );
+    }
+
+    console.error("ADD PACKAGE ERROR:", error);
 
     return NextResponse.json(
-      {
-        success: false,
-
-        error:
-          error instanceof Error ? error.message : "Gagal menyimpan package",
-      },
-      {
-        status: 500,
-      },
+      { success: false, error: "Gagal menyimpan package" },
+      { status: 500 },
     );
   }
 }

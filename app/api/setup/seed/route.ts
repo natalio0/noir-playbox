@@ -21,6 +21,13 @@ const USERS = [
 
 export async function POST(request: Request) {
   try {
+    if (
+      process.env.NODE_ENV === "production" &&
+      process.env.ALLOW_PRODUCTION_SEED !== "true"
+    ) {
+      return Response.json({ success: false, error: "Not found" }, { status: 404 });
+    }
+
     const seedSecret = process.env.SETUP_SEED_SECRET;
 
     if (!seedSecret) {

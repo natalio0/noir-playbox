@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { listRegisteredDevicesForUser } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
-import { getDynamicTuyaState } from "@/lib/tuya-cloud-dynamic";
+import { getCachedDynamicTuyaState } from "@/lib/tuya-cloud-dynamic";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +39,10 @@ export async function GET(request: Request) {
   try {
     const user = await requireUserFromRequest(request);
 
-    const registryDevices = await listRegisteredDevicesForUser(user.profile);
+    const registryDevices = await listRegisteredDevicesForUser(user.profile, {
+      // Realtime UI hanya memakai cafeId; hindari read dokumen cafe setiap polling.
+      includeCafeNames: false,
+    });
 
     const allowedDeviceIds = new Set(
       registryDevices.map((device) => device.deviceId.toUpperCase()),
@@ -110,7 +113,7 @@ export async function GET(request: Request) {
         }
 
         try {
-          const state = await getDynamicTuyaState(tuyaDeviceId);
+          const state = await getCachedDynamicTuyaState(tuyaDeviceId);
 
           return {
             id: deviceId,

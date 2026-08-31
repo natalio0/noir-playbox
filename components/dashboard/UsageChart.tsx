@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 
 import {
   Bar,
@@ -44,8 +44,13 @@ export default function UsageChart() {
   ========================================================= */
 
   useEffect(() => {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
     const sessionsQuery = query(
       collection(db, "sessions"),
+      where("startedAt", ">=", sevenDaysAgo),
       orderBy("startedAt", "desc"),
     );
 

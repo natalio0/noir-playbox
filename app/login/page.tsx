@@ -71,8 +71,6 @@ export default function LoginPage() {
 
       const firebaseUser = credential.user;
 
-      console.log("🔥 FIREBASE LOGIN SUCCESS:", firebaseUser.uid);
-
       /*
        * Login page dan AuthProvider memakai request profile yang sama.
        * Jika onAuthStateChanged berjalan bersamaan, request tidak diduplikasi.
@@ -85,8 +83,6 @@ export default function LoginPage() {
       ================================================= */
 
       const role = profile.role;
-
-      console.log("🔥 USER ROLE:", role);
 
       /* =================================================
          REDIRECT

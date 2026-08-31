@@ -78,13 +78,6 @@ export default function RoleGuard({ children }: { children: React.ReactNode }) {
 
     const role = profile.role;
 
-    console.log("=================================");
-    console.log("🔐 ROLE GUARD");
-    console.log("USER:", user.email);
-    console.log("ROLE:", role);
-    console.log("PATH:", pathname);
-    console.log("=================================");
-
     /*
      * ===============================================
      * ADMIN
@@ -107,8 +100,6 @@ export default function RoleGuard({ children }: { children: React.ReactNode }) {
       const allowed = isOperationalAllowed(pathname);
 
       if (!allowed) {
-        console.warn("🚫 OPERATIONAL ACCESS DENIED:", pathname);
-
         router.replace("/realtime");
 
         return;

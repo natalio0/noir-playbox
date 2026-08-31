@@ -116,6 +116,58 @@ export async function getDynamicTuyaState(rawDeviceId: string): Promise<DynamicD
   };
 }
 
+type TuyaStateCacheEntry = {
+  state: DynamicDeviceState | null;
+  expiresAt: number;
+  inFlight: Promise<DynamicDeviceState> | null;
+};
+
+const tuyaStateCache = new Map<string, TuyaStateCacheEntry>();
+
+/**
+ * Short server-side cache only for monitoring reads. Control routes still call
+ * Tuya directly, so ON/OFF/TIMER commands are never delayed by this cache.
+ */
+export async function getCachedDynamicTuyaState(
+  rawDeviceId: string,
+  ttlMs = 3000,
+): Promise<DynamicDeviceState> {
+  const key = rawDeviceId.trim();
+  const now = Date.now();
+  const cached = tuyaStateCache.get(key);
+
+  if (cached?.state && cached.expiresAt > now) {
+    return cached.state;
+  }
+
+  if (cached?.inFlight) {
+    return cached.inFlight;
+  }
+
+  const inFlight = getDynamicTuyaState(key);
+
+  tuyaStateCache.set(key, {
+    state: cached?.state ?? null,
+    expiresAt: cached?.expiresAt ?? 0,
+    inFlight,
+  });
+
+  try {
+    const state = await inFlight;
+
+    tuyaStateCache.set(key, {
+      state,
+      expiresAt: Date.now() + Math.max(0, ttlMs),
+      inFlight: null,
+    });
+
+    return state;
+  } catch (error) {
+    tuyaStateCache.delete(key);
+    throw error;
+  }
+}
+
 export type TuyaStandardCommand = { code: string; value: unknown };
 
 export async function sendTuyaStandardCommands(

@@ -3,6 +3,10 @@ import { getTuyaDeviceState } from "@/lib/tuya";
 
 export async function GET() {
   try {
+    if (process.env.NODE_ENV === "production") {
+      return NextResponse.json({ success: false, error: "Not found" }, { status: 404 });
+    }
+
     const deviceId = process.env.TUYA_DEVICE_ID;
 
     if (!deviceId) {

@@ -2,6 +2,7 @@ import { FieldValue } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
+import { invalidateRegisteredDeviceCache } from "@/lib/device-registry";
 import { getRawTuyaDevice } from "@/lib/tuya-raw";
 
 export async function POST(
@@ -173,6 +174,8 @@ export async function POST(
       updatedAt:
         FieldValue.serverTimestamp(),
     });
+
+    invalidateRegisteredDeviceCache();
 
     return Response.json({
       success: true,

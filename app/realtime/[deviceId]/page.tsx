@@ -35,47 +35,13 @@ import {
   type ShutdownSession,
 } from "@/lib/preparing";
 
+import { RENTAL_PACKAGES } from "@/lib/rental-packages";
+
 /* =========================================================
    PACKAGES
 ========================================================= */
 
-const PACKAGES = [
-  {
-    id: "1h",
-    name: "1 Jam",
-    durationMinutes: 60,
-    price: 12000,
-    saving: 0,
-  },
-  {
-    id: "2h",
-    name: "2 Jam",
-    durationMinutes: 120,
-    price: 22000,
-    saving: 2000,
-  },
-  {
-    id: "3h",
-    name: "3 Jam",
-    durationMinutes: 180,
-    price: 30000,
-    saving: 6000,
-  },
-  {
-    id: "5h",
-    name: "5 Jam",
-    durationMinutes: 300,
-    price: 45000,
-    saving: 15000,
-  },
-  {
-    id: "10h",
-    name: "10 Jam",
-    durationMinutes: 600,
-    price: 80000,
-    saving: 40000,
-  },
-];
+const PACKAGES = RENTAL_PACKAGES;
 
 /* =========================================================
    TYPES
@@ -775,13 +741,10 @@ export default function PSDetailPage({
 
       body: JSON.stringify({
         deviceId: rawDeviceId,
-
+        packageId: pkg.id,
         durationSeconds: pkg.durationMinutes * 60,
-
         durationMinutes: pkg.durationMinutes,
-
         packageName: pkg.name,
-
         price: pkg.price,
       }),
 
@@ -823,12 +786,10 @@ export default function PSDetailPage({
       },
 
       body: JSON.stringify({
+        packageId: pkg.id,
         name: pkg.name,
-
         durationMinutes: pkg.durationMinutes,
-
         durationSeconds: pkg.durationMinutes * 60,
-
         price: pkg.price,
       }),
 
