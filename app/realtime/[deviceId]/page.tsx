@@ -155,6 +155,7 @@ export default function PSDetailPage({
    * - verification setelah command memakai satu timer yang bisa diganti
    */
   const tuyaFetchInFlightRef = useRef<Promise<void> | null>(null);
+  const tuyaFetchAbortControllerRef = useRef<AbortController | null>(null);
   const lastTuyaRequestAtRef = useRef<number>(0);
   const tuyaPollingPausedUntilRef = useRef<number>(0);
   const tuyaVerificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -303,6 +304,28 @@ export default function PSDetailPage({
     [],
   );
 
+  const beginTuyaActionWindow = useCallback(() => {
+    /*
+     * Dipanggil sinkron di baris paling awal setiap operasi.
+     *
+     * Selain mem-pause polling baru, batalkan monitoring GET yang mungkin
+     * sudah mulai beberapa milidetik sebelum operator menekan tombol.
+     * Ini menutup race "PATCH complete -> GET Tuya -> POST STOP".
+     */
+    pauseTuyaPolling(TUYA_ACTION_POLL_PAUSE_MS);
+
+    if (tuyaVerificationTimerRef.current) {
+      clearTimeout(tuyaVerificationTimerRef.current);
+      tuyaVerificationTimerRef.current = null;
+    }
+
+    const controller = tuyaFetchAbortControllerRef.current;
+
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+    }
+  }, [pauseTuyaPolling]);
+
   /* =======================================================
      FETCH TUYA
   ======================================================= */
@@ -345,6 +368,9 @@ export default function PSDetailPage({
 
       lastTuyaRequestAtRef.current = now;
 
+      const controller = new AbortController();
+      tuyaFetchAbortControllerRef.current = controller;
+
       const request = (async () => {
         try {
           const user = auth.currentUser;
@@ -357,6 +383,7 @@ export default function PSDetailPage({
 
           const response = await fetch(`/api/tuya/device/${deviceId}`, {
             cache: "no-store",
+            signal: controller.signal,
             headers: {
               Authorization: `Bearer ${idToken}`,
             },
@@ -416,6 +443,10 @@ export default function PSDetailPage({
           lastTuyaSyncRef.current = Date.now();
           setError(null);
         } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            return;
+          }
+
           console.error("FETCH DEVICE ERROR:", error);
 
           setError(
@@ -424,6 +455,10 @@ export default function PSDetailPage({
               : "Gagal mengambil status device",
           );
         } finally {
+          if (tuyaFetchAbortControllerRef.current === controller) {
+            tuyaFetchAbortControllerRef.current = null;
+          }
+
           setLoading(false);
         }
       })();
@@ -470,6 +505,8 @@ export default function PSDetailPage({
       if (tuyaVerificationTimerRef.current) {
         clearTimeout(tuyaVerificationTimerRef.current);
       }
+
+      tuyaFetchAbortControllerRef.current?.abort();
     };
   }, []);
 
@@ -592,6 +629,7 @@ export default function PSDetailPage({
     }
 
     expiryStopRef.current = true;
+    beginTuyaActionWindow();
 
     try {
       /*
@@ -882,10 +920,11 @@ export default function PSDetailPage({
       return;
     }
 
+    beginTuyaActionWindow();
+
     try {
       setControlLoading(true);
       setError(null);
-      pauseTuyaPolling();
 
       /*
        * FIREBASE FIRST:
@@ -974,10 +1013,11 @@ export default function PSDetailPage({
       return;
     }
 
+    beginTuyaActionWindow();
+
     try {
       setControlLoading(true);
       setError(null);
-      pauseTuyaPolling();
 
       const user = auth.currentUser;
 
@@ -1047,10 +1087,11 @@ export default function PSDetailPage({
       return;
     }
 
+    beginTuyaActionWindow();
+
     try {
       setControlLoading(true);
       setError(null);
-      pauseTuyaPolling();
 
       const user = auth.currentUser;
 
@@ -1149,10 +1190,11 @@ export default function PSDetailPage({
       return;
     }
 
+    beginTuyaActionWindow();
+
     try {
       setControlLoading(true);
       setError(null);
-      pauseTuyaPolling();
 
       const selectedPackage =
         durationMinutes !== undefined
