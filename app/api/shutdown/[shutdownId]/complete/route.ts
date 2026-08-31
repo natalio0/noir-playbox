@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 
 import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
@@ -11,6 +11,9 @@ export async function PATCH(
   try {
     const user = await requireUserFromRequest(request);
     const { shutdownId } = await context.params;
+    const body = await request.json().catch(() => ({}));
+    const action = String(body.action ?? "COMPLETE").toUpperCase();
+
     const ref = adminDb.collection("shutdown_sessions").doc(shutdownId);
     const snapshot = await ref.get();
 
@@ -30,8 +33,52 @@ export async function PATCH(
       );
     }
 
+    if (action === "SKIP_REUSE") {
+      if (data.status === "SHUTDOWN_SKIPPED_REUSED") {
+        return Response.json({ success: true, skipped: true });
+      }
+
+      if (data.status !== "SHUTDOWN_PENDING") {
+        return Response.json(
+          { success: false, error: "Shutdown pending sudah tidak tersedia" },
+          { status: 409 },
+        );
+      }
+
+      const now = Timestamp.now();
+      const batch = adminDb.batch();
+
+      batch.update(ref, {
+        status: "SHUTDOWN_SKIPPED_REUSED",
+        endedAt: now,
+        updatedAt: now,
+      });
+
+      const auditRef = adminDb.collection("audit_logs").doc();
+      batch.set(auditRef, {
+        type: "SHUTDOWN_PENDING_SKIPPED_REUSED",
+        deviceId: data.deviceId ?? null,
+        cafeId: data.cafeId ?? null,
+        shutdownId,
+        sourceSessionId: data.sourceSessionId ?? null,
+        operatorUid: user.uid,
+        createdAt: now,
+      });
+
+      await batch.commit();
+
+      return Response.json({ success: true, skipped: true });
+    }
+
+    if (data.status === "SHUTDOWN_COMPLETED") {
+      return Response.json({ success: true, durationMinutes: data.durationMinutes ?? 0 });
+    }
+
     if (data.status !== "SHUTDOWN_ACTIVE") {
-      return Response.json({ success: true });
+      return Response.json(
+        { success: false, error: "Shutdown Mode belum aktif" },
+        { status: 409 },
+      );
     }
 
     const startedAtMs = data.startedAt?.toDate?.().getTime?.() ?? Date.now();
@@ -39,14 +86,14 @@ export async function PATCH(
       0,
       Math.floor((Date.now() - startedAtMs) / 60_000),
     );
-
+    const now = Timestamp.now();
     const batch = adminDb.batch();
 
     batch.update(ref, {
       status: "SHUTDOWN_COMPLETED",
-      endedAt: FieldValue.serverTimestamp(),
+      endedAt: now,
       durationMinutes,
-      updatedAt: FieldValue.serverTimestamp(),
+      updatedAt: now,
     });
 
     const auditRef = adminDb.collection("audit_logs").doc();
@@ -56,9 +103,9 @@ export async function PATCH(
       cafeId: data.cafeId ?? null,
       shutdownId,
       sourceSessionId: data.sourceSessionId ?? null,
-      operatorUid: data.operatorUid ?? null,
+      operatorUid: user.uid,
       durationMinutes,
-      createdAt: FieldValue.serverTimestamp(),
+      createdAt: now,
     });
 
     await batch.commit();
@@ -66,10 +113,14 @@ export async function PATCH(
     return Response.json({ success: true, durationMinutes });
   } catch (error) {
     console.error("COMPLETE SHUTDOWN ERROR:", error);
-    const message = error instanceof Error ? error.message : "Internal server error";
+    const message =
+      error instanceof Error ? error.message : "Internal server error";
 
     return Response.json(
-      { success: false, error: message === "UNAUTHORIZED" ? "Unauthorized" : message },
+      {
+        success: false,
+        error: message === "UNAUTHORIZED" ? "Unauthorized" : message,
+      },
       { status: message === "UNAUTHORIZED" ? 401 : 500 },
     );
   }

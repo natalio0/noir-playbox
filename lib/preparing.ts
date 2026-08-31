@@ -16,7 +16,11 @@ export type PreparingSession = {
 export type ShutdownSession = {
   id: string;
   deviceId: string;
-  status: "SHUTDOWN_ACTIVE" | "SHUTDOWN_COMPLETED";
+  status:
+    | "SHUTDOWN_PENDING"
+    | "SHUTDOWN_ACTIVE"
+    | "SHUTDOWN_COMPLETED"
+    | "SHUTDOWN_SKIPPED_REUSED";
   startedAt: string | null;
   endedAt: string | null;
   operatorUid: string | null;
@@ -83,29 +87,6 @@ export async function startPreparingSession(
   }
 
   return data.preparing as PreparingSession;
-}
-
-export async function convertPreparingToBilling(
-  preparingId: string,
-  billingSessionId: string,
-): Promise<void> {
-  const idToken = await getIdToken();
-
-  const response = await fetch(`/api/preparing/${preparingId}/activate`, {
-    method: "PATCH",
-    cache: "no-store",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({ billingSessionId }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || "Gagal mengaktifkan billing");
-  }
 }
 
 export async function endPreparingWithoutBilling(
@@ -240,6 +221,7 @@ export async function completeShutdownMode(shutdownId: string): Promise<void> {
     throw new Error(data.error || "Gagal menyelesaikan shutdown mode");
   }
 }
+
 
 export function getShutdownElapsedMinutes(
   startedAt: string | null,

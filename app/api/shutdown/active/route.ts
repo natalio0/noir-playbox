@@ -5,6 +5,22 @@ import {
 } from "@/lib/device-registry";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 
+function serializeShutdown(
+  doc: FirebaseFirestore.QueryDocumentSnapshot,
+) {
+  const data = doc.data();
+
+  return {
+    id: doc.id,
+    deviceId: data.deviceId ?? "",
+    status: data.status ?? "SHUTDOWN_PENDING",
+    startedAt: data.startedAt?.toDate?.().toISOString?.() ?? null,
+    endedAt: data.endedAt?.toDate?.().toISOString?.() ?? null,
+    operatorUid: data.operatorUid ?? null,
+    sourceSessionId: data.sourceSessionId ?? null,
+  };
+}
+
 export async function GET(request: Request) {
   try {
     const user = await requireUserFromRequest(request);
@@ -36,39 +52,50 @@ export async function GET(request: Request) {
       );
     }
 
-    const snapshot = await adminDb
-      .collection("shutdown_sessions")
-      .where("deviceId", "==", deviceId)
-      .where("status", "==", "SHUTDOWN_ACTIVE")
-      .limit(1)
-      .get();
+    /*
+     * ACTIVE diprioritaskan. Jika tidak ada, restore PENDING.
+     * Dua query jalan paralel supaya refresh detail tetap cepat.
+     */
+    const [activeSnapshot, pendingSnapshot] = await Promise.all([
+      adminDb
+        .collection("shutdown_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "SHUTDOWN_ACTIVE")
+        .limit(1)
+        .get(),
+      adminDb
+        .collection("shutdown_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "SHUTDOWN_PENDING")
+        .limit(1)
+        .get(),
+    ]);
 
-    if (snapshot.empty) {
+    const doc = !activeSnapshot.empty
+      ? activeSnapshot.docs[0]
+      : !pendingSnapshot.empty
+        ? pendingSnapshot.docs[0]
+        : null;
+
+    if (!doc) {
       return Response.json({ success: true, active: false, shutdown: null });
     }
-
-    const doc = snapshot.docs[0];
-    const data = doc.data();
 
     return Response.json({
       success: true,
       active: true,
-      shutdown: {
-        id: doc.id,
-        deviceId: data.deviceId ?? "",
-        status: data.status ?? "SHUTDOWN_ACTIVE",
-        startedAt: data.startedAt?.toDate?.().toISOString?.() ?? null,
-        endedAt: data.endedAt?.toDate?.().toISOString?.() ?? null,
-        operatorUid: data.operatorUid ?? null,
-        sourceSessionId: data.sourceSessionId ?? null,
-      },
+      shutdown: serializeShutdown(doc),
     });
   } catch (error) {
     console.error("GET ACTIVE SHUTDOWN ERROR:", error);
-    const message = error instanceof Error ? error.message : "Internal server error";
+    const message =
+      error instanceof Error ? error.message : "Internal server error";
 
     return Response.json(
-      { success: false, error: message === "UNAUTHORIZED" ? "Unauthorized" : message },
+      {
+        success: false,
+        error: message === "UNAUTHORIZED" ? "Unauthorized" : message,
+      },
       { status: message === "UNAUTHORIZED" ? 401 : 500 },
     );
   }

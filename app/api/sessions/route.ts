@@ -73,10 +73,28 @@ export async function POST(request: Request) {
         .where("status", "==", "ACTIVE")
         .limit(1);
 
+      const activeShutdownQuery = adminDb
+        .collection("shutdown_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "SHUTDOWN_ACTIVE")
+        .limit(1);
+
+      const pendingShutdownQuery = adminDb
+        .collection("shutdown_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "SHUTDOWN_PENDING")
+        .limit(1);
+
       const activeSnapshot = await transaction.get(activeQuery);
+      const activeShutdownSnapshot = await transaction.get(activeShutdownQuery);
+      const pendingShutdownSnapshot = await transaction.get(pendingShutdownQuery);
 
       if (!activeSnapshot.empty) {
         throw new Error("SESSION_ACTIVE");
+      }
+
+      if (!activeShutdownSnapshot.empty) {
+        throw new Error("SHUTDOWN_ACTIVE");
       }
 
       let resolvedPreparingRef = preparingRef;
@@ -148,6 +166,20 @@ export async function POST(request: Request) {
         addedAt: startedAt,
       });
 
+      /*
+       * Jika rental baru benar-benar dimulai, shutdown pending dari rental
+       * sebelumnya otomatis ditutup sebagai reuse. Ini fallback server-side
+       * agar pending lama tidak pernah menggantung walau request skip client
+       * terlambat atau browser berpindah halaman.
+       */
+      if (!pendingShutdownSnapshot.empty) {
+        transaction.update(pendingShutdownSnapshot.docs[0].ref, {
+          status: "SHUTDOWN_SKIPPED_REUSED",
+          endedAt: startedAt,
+          updatedAt: startedAt,
+        });
+      }
+
       if (resolvedPreparingRef && preparingData) {
         transaction.update(resolvedPreparingRef, {
           status: "CONVERTED_TO_BILLING",
@@ -212,6 +244,16 @@ export async function POST(request: Request) {
     if (message === "SESSION_ACTIVE") {
       return Response.json(
         { success: false, error: "PlayBox masih memiliki session ACTIVE" },
+        { status: 409 },
+      );
+    }
+
+    if (message === "SHUTDOWN_ACTIVE") {
+      return Response.json(
+        {
+          success: false,
+          error: "Shutdown Mode masih aktif. Selesaikan shutdown terlebih dahulu.",
+        },
         { status: 409 },
       );
     }

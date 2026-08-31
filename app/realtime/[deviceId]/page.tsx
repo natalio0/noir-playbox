@@ -127,10 +127,6 @@ export default function PSDetailPage({
     null,
   );
 
-  const [lastCompletedSessionId, setLastCompletedSessionId] = useState<
-    string | null
-  >(null);
-
   const [preparingNow, setPreparingNow] = useState(0);
 
   /* =======================================================
@@ -395,12 +391,19 @@ export default function PSDetailPage({
     }
 
     const initialize = async () => {
-      await restoreActiveSession(rawDeviceId);
-
-      await fetchDeviceState(rawDeviceId);
+      /*
+       * Session Firebase dan status Tuya tidak saling menunggu.
+       * Ini memangkas initial detail load karena dua network request jalan
+       * paralel. restoreActiveSession tetap akan menimpa countdown dengan
+       * Firebase bila ada billing aktif.
+       */
+      await Promise.allSettled([
+        restoreActiveSession(rawDeviceId),
+        fetchDeviceState(rawDeviceId),
+      ]);
     };
 
-    initialize();
+    void initialize();
   }, [rawDeviceId, restoreActiveSession, fetchDeviceState]);
 
   /* =======================================================
@@ -487,8 +490,8 @@ export default function PSDetailPage({
 
      Firebase adalah source of truth untuk waktu rental.
      Saat countdown Firebase mencapai 0:
-     1. Kirim STOP ke BARDI/Tuya sebagai pengaman.
-     2. Complete session Firebase.
+     1. Complete session Firebase + buat SHUTDOWN_PENDING.
+     2. Kirim STOP ke BARDI/Tuya sebagai best-effort background.
   ======================================================= */
 
   async function handleExpiredSession(sessionId: string) {
@@ -499,89 +502,76 @@ export default function PSDetailPage({
     expiryStopRef.current = true;
 
     try {
-      console.log("=================================");
-      console.log("⏰ FIREBASE TIMER HABIS");
-      console.log("STOP BARDI + COMPLETE SESSION");
-      console.log("SESSION:", sessionId);
-      console.log("=================================");
-
-      const user = auth.currentUser;
-
-      if (!user) {
-        throw new Error("User belum login");
-      }
-
-      const idToken = await user.getIdToken();
-
       /*
-       * Best-effort STOP ke BARDI/Tuya.
-       * Session tetap ditutup berdasarkan waktu Firebase meskipun
-       * device sedang offline atau Tuya gagal merespons.
+       * Firebase-first, sama seperti tombol STOP manual. COMPLETE langsung
+       * membuat SHUTDOWN_PENDING persistent; BARDI STOP hanya best-effort dan
+       * tidak boleh menahan penyelesaian billing.
        */
-      try {
-        const stopResponse = await fetch("/api/tuya/control", {
-          method: "POST",
-          cache: "no-store",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            deviceId: rawDeviceId,
-            action: "STOP",
-          }),
-        });
-
-        const stopData = await stopResponse.json();
-
-        if (!stopResponse.ok || !stopData.success) {
-          const stopMessage = String(
-            stopData.error ?? stopData.message ?? "Gagal mematikan BARDI",
-          );
-
-          const offline =
-            stopMessage.toLowerCase().includes("offline") ||
-            stopMessage.includes("40000801");
-
-          if (offline) {
-            setDeviceOnline(false);
-            setDeviceState(null);
-
-            showNotification(
-              "warning",
-              "Waktu rental habis. Session ditutup, tetapi BARDI sedang offline.",
-            );
-          } else {
-            console.error("AUTO STOP TUYA ERROR:", stopMessage);
-
-            showNotification(
-              "warning",
-              "Waktu rental habis. Session akan ditutup, tetapi konfirmasi STOP BARDI gagal.",
-            );
-          }
-        } else {
-          setDeviceState((current) =>
-            current
-              ? {
-                  ...current,
-                  switch: false,
-                  countdown: 0,
-                }
-              : current,
-          );
-        }
-      } catch (stopError) {
-        console.error("AUTO STOP TUYA ERROR:", stopError);
-
-        showNotification(
-          "warning",
-          "Waktu rental habis. Session ditutup, tetapi STOP BARDI tidak dapat dikonfirmasi.",
-        );
-      }
-
       await completeSession(sessionId);
 
-      showNotification("success", "Waktu rental habis. Session telah selesai.");
+      setDeviceState((current) =>
+        current
+          ? {
+              ...current,
+              switch: false,
+              countdown: 0,
+            }
+          : current,
+      );
+      countdownRef.current = 0;
+      setLiveCountdown(0);
+
+      showNotification(
+        "success",
+        "Waktu rental habis. Billing selesai dan shutdown pending tersimpan.",
+      );
+
+      void (async () => {
+        try {
+          const user = auth.currentUser;
+
+          if (!user) {
+            return;
+          }
+
+          const idToken = await user.getIdToken();
+          const stopResponse = await fetch("/api/tuya/control", {
+            method: "POST",
+            cache: "no-store",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              deviceId: rawDeviceId,
+              action: "STOP",
+            }),
+          });
+
+          const stopData = await stopResponse.json();
+
+          if (!stopResponse.ok || !stopData.success) {
+            throw new Error(
+              String(
+                stopData.error ??
+                  stopData.message ??
+                  "Gagal mematikan BARDI",
+              ),
+            );
+          }
+
+          window.setTimeout(() => {
+            void fetchDeviceState(rawDeviceId);
+          }, 350);
+        } catch (stopError) {
+          console.error("AUTO STOP TUYA ERROR:", stopError);
+
+          showNotification(
+            "warning",
+            "Billing sudah selesai, tetapi BARDI belum dapat dikonfirmasi OFF. Shutdown pending tetap tersimpan.",
+          );
+        }
+      })();
     } catch (error) {
       console.error("SESSION EXPIRY ERROR:", error);
 
@@ -679,7 +669,10 @@ export default function PSDetailPage({
        * Firebase sudah menjadi source of truth. Begitu COMPLETE sukses,
        * UI billing langsung ditutup tanpa menunggu round-trip Tuya.
        */
-      setLastCompletedSessionId(sessionId);
+      if (data.shutdown) {
+        setShutdownMode(data.shutdown as ShutdownSession);
+      }
+
       sessionRef.current = null;
       expiryStopRef.current = false;
       setSession(null);
@@ -794,7 +787,7 @@ export default function PSDetailPage({
   ======================================================= */
 
   async function startOperationalShutdownMode() {
-    if (!rawDeviceId) {
+    if (!rawDeviceId || shutdownMode?.status !== "SHUTDOWN_PENDING") {
       return;
     }
 
@@ -838,7 +831,7 @@ export default function PSDetailPage({
 
       const createdShutdown = await startShutdownMode(
         rawDeviceId,
-        lastCompletedSessionId,
+        shutdownMode.sourceSessionId,
       );
 
       setShutdownMode(createdShutdown);
@@ -866,9 +859,10 @@ export default function PSDetailPage({
         "Shutdown Mode aktif. Monitor dinyalakan untuk mematikan PS4 secara normal.",
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      await fetchDeviceState(rawDeviceId);
+      /* Status Tuya diverifikasi background; tombol tidak perlu menunggu GET. */
+      window.setTimeout(() => {
+        void fetchDeviceState(rawDeviceId);
+      }, 350);
     } catch (error) {
       console.error("START SHUTDOWN MODE ERROR:", error);
 
@@ -881,7 +875,7 @@ export default function PSDetailPage({
   }
 
   async function finishOperationalShutdownMode() {
-    if (!rawDeviceId || !shutdownMode) {
+    if (!rawDeviceId || shutdownMode?.status !== "SHUTDOWN_ACTIVE") {
       return;
     }
 
@@ -949,9 +943,9 @@ export default function PSDetailPage({
         "Shutdown selesai. Monitor telah dimatikan. Kabel power utama sekarang dapat dicabut.",
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      await fetchDeviceState(rawDeviceId);
+      window.setTimeout(() => {
+        void fetchDeviceState(rawDeviceId);
+      }, 350);
     } catch (error) {
       console.error("FINISH SHUTDOWN MODE ERROR:", error);
 
@@ -1174,19 +1168,39 @@ export default function PSDetailPage({
       }
 
       /* ===================================================
-         TUYA CONTROL UTAMA
+         POWER ON → PREPARING (PARALLEL + FAIL SAFE)
+
+         Tuya ON dan pembuatan PREPARING berjalan paralel. Ini menghapus
+         kesan lambat karena sebelumnya dua request ditunggu serial.
+
+         Safety:
+         - Tuya sukses, PREPARING gagal  -> monitor di-STOP kembali.
+         - PREPARING sukses, Tuya gagal  -> PREPARING ditutup tanpa billing.
+         Jadi tidak ada monitor ON tanpa audit PREPARING.
       =================================================== */
 
-      await sendTuyaCommand(action, {
-        ...(durationMinutes !== undefined ? { durationMinutes } : {}),
-      });
+      if (action === "ON" && !sessionRef.current) {
+        /*
+         * Optimistic UI: operator langsung melihat state PREPARING sementara
+         * request Tuya + Firebase berjalan. Tombol paket tetap disabled karena
+         * controlLoading=true sampai keduanya sukses.
+         */
+        const optimisticPreparing: PreparingSession = {
+          id: "__starting__",
+          deviceId: rawDeviceId.toUpperCase(),
+          status: "PREPARING",
+          startedAt: new Date().toISOString(),
+          activatedAt: null,
+          endedAt: null,
+          billingSessionId: null,
+          operatorUid: user.uid,
+        };
 
-      /* Optimistic device state: jangan tunggu GET Tuya berikutnya. */
-      if (action === "ON") {
+        setPreparing(optimisticPreparing);
         setDeviceOnline(true);
         setDeviceState((current) =>
           current
-            ? { ...current, switch: true }
+            ? { ...current, switch: true, countdown: 0 }
             : {
                 switch: true,
                 countdown: 0,
@@ -1195,8 +1209,62 @@ export default function PSDetailPage({
                 voltage: 0,
               },
         );
+
+        const [tuyaResult, preparingResult] = await Promise.allSettled([
+          sendTuyaCommand("ON"),
+          startPreparingSession(rawDeviceId),
+        ]);
+
+        if (tuyaResult.status === "rejected") {
+          setPreparing(null);
+          setDeviceState((current) =>
+            current ? { ...current, switch: false, countdown: 0 } : current,
+          );
+
+          if (preparingResult.status === "fulfilled") {
+            try {
+              await endPreparingWithoutBilling(preparingResult.value.id);
+            } catch (cleanupError) {
+              console.error("PREPARING CLEANUP AFTER TUYA FAILURE:", cleanupError);
+            }
+          }
+
+          throw tuyaResult.reason;
+        }
+
+        if (preparingResult.status === "rejected") {
+          setPreparing(null);
+
+          try {
+            await sendTuyaCommand("STOP");
+          } catch (rollbackError) {
+            console.error("TUYA ROLLBACK AFTER PREPARING FAILURE:", rollbackError);
+          }
+
+          setDeviceState((current) =>
+            current ? { ...current, switch: false, countdown: 0 } : current,
+          );
+
+          throw preparingResult.reason;
+        }
+
+        const activePreparing = preparingResult.value;
+        setPreparing(activePreparing);
+
+        showNotification("success", "PREPARING aktif. Pilih paket saat unit siap.");
+        verifyTuyaInBackground();
+        return;
       }
 
+      /* ===================================================
+         TUYA CONTROL UTAMA
+      =================================================== */
+
+      await sendTuyaCommand(action, {
+        ...(durationMinutes !== undefined ? { durationMinutes } : {}),
+      });
+
+      /* Optimistic device state: jangan tunggu GET Tuya berikutnya. */
       if (action === "TIMER" && selectedPackage) {
         const seconds = selectedPackage.durationMinutes * 60;
 
@@ -1224,27 +1292,6 @@ export default function PSDetailPage({
         );
         countdownRef.current = 0;
         setLiveCountdown(0);
-      }
-
-      /* ===================================================
-         POWER ON → PREPARING
-
-         /api/preparing/start sudah idempotent. Tidak perlu GET active
-         PREPARING dulu, sehingga satu network round-trip dihapus.
-      =================================================== */
-
-      if (action === "ON" && !sessionRef.current && !shutdownMode) {
-        try {
-          const activePreparing = await startPreparingSession(rawDeviceId);
-          setPreparing(activePreparing);
-        } catch (preparingError) {
-          console.error("START PREPARING ERROR:", preparingError);
-
-          showNotification(
-            "warning",
-            "Monitor berhasil dinyalakan, tetapi audit PREPARING gagal dibuat.",
-          );
-        }
       }
 
       /* ===================================================
@@ -1279,6 +1326,10 @@ export default function PSDetailPage({
 
           if (created.preparingConverted || preparing) {
             setPreparing(null);
+          }
+
+          if (shutdownMode?.status === "SHUTDOWN_PENDING") {
+            setShutdownMode(null);
           }
 
           showNotification("success", "Billing berhasil dimulai.");
@@ -1369,7 +1420,9 @@ export default function PSDetailPage({
   );
 
   const shutdownElapsedMinutes = getShutdownElapsedMinutes(
-    shutdownMode?.startedAt ?? null,
+    shutdownMode?.status === "SHUTDOWN_ACTIVE"
+      ? shutdownMode.startedAt
+      : null,
     preparingNow,
   );
 
@@ -1606,7 +1659,7 @@ export default function PSDetailPage({
 
           {/* SHUTDOWN MODE */}
 
-          {shutdownMode && (
+          {shutdownMode?.status === "SHUTDOWN_ACTIVE" && (
             <div className="rounded-xl border border-violet-200 bg-violet-50 p-5 shadow-sm">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -1763,42 +1816,58 @@ export default function PSDetailPage({
                   </div>
                 )}
 
-              {/* SHUTDOWN MODE ENTRY */}
+              {/* SHUTDOWN PENDING — PERSISTENT */}
 
               {!restoringSession &&
-                !isOffline &&
-                !isOn &&
                 !sessionActive &&
                 !preparing &&
-                !shutdownMode &&
-                lastCompletedSessionId && (
+                shutdownMode?.status === "SHUTDOWN_PENDING" && (
                   <div className="rounded-xl border border-violet-200 bg-violet-50 p-5">
                     <p className="text-sm font-semibold text-violet-700">
-                      Rental terakhir sudah selesai
+                      Rental selesai — PS4 belum dikonfirmasi shutdown
                     </p>
 
                     <p className="mt-1 text-xs leading-5 text-violet-600">
-                      Jika operational perlu menyalakan monitor untuk shutdown
-                      PS4, gunakan tombol khusus di bawah. Aksi ini tidak
-                      membuat billing.
+                      Status ini disimpan di Firebase. Refresh, logout/login,
+                      atau pindah halaman tidak akan menghilangkan opsi shutdown.
+                      Shutdown Mode tidak membuat billing dan tidak dihitung
+                      sebagai PREPARING.
                     </p>
 
-                    <button
-                      type="button"
-                      onClick={startOperationalShutdownMode}
-                      disabled={controlLoading}
-                      className="mt-4 w-full rounded-xl bg-violet-600 px-5 py-4 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {controlLoading
-                        ? "Menyalakan Monitor..."
-                        : "SHUTDOWN MODE"}
-                    </button>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={startOperationalShutdownMode}
+                        disabled={controlLoading || isOffline}
+                        className="w-full rounded-xl bg-violet-600 px-5 py-4 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isOffline
+                          ? "DEVICE OFFLINE"
+                          : controlLoading
+                            ? "Menyalakan Monitor..."
+                            : "SHUTDOWN MODE"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => controlDevice("ON")}
+                        disabled={deviceControlDisabled}
+                        className="w-full rounded-xl border border-blue-200 bg-white px-5 py-4 text-sm font-semibold text-blue-700 transition hover:border-blue-400 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {controlLoading
+                          ? "Menyiapkan..."
+                          : "SIAPKAN RENTAL BERIKUTNYA"}
+                      </button>
+                    </div>
                   </div>
                 )}
 
               {/* ON NO SESSION */}
 
-              {!restoringSession && isOn && !sessionActive && !shutdownMode && (
+              {!restoringSession &&
+                isOn &&
+                !sessionActive &&
+                shutdownMode?.status !== "SHUTDOWN_ACTIVE" && (
                 <div>
                   <div className="mb-4 rounded-xl bg-blue-50 p-5">
                     <p className="text-sm font-semibold text-blue-700">

@@ -43,12 +43,30 @@ export async function POST(request: Request) {
       );
     }
 
-    const existing = await adminDb
-      .collection("preparing_sessions")
-      .where("deviceId", "==", deviceId)
-      .where("status", "==", "PREPARING")
-      .limit(1)
-      .get();
+    const [existing, activeShutdown] = await Promise.all([
+      adminDb
+        .collection("preparing_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "PREPARING")
+        .limit(1)
+        .get(),
+      adminDb
+        .collection("shutdown_sessions")
+        .where("deviceId", "==", deviceId)
+        .where("status", "==", "SHUTDOWN_ACTIVE")
+        .limit(1)
+        .get(),
+    ]);
+
+    if (!activeShutdown.empty) {
+      return Response.json(
+        {
+          success: false,
+          error: "Shutdown Mode masih aktif. Selesaikan shutdown terlebih dahulu.",
+        },
+        { status: 409 },
+      );
+    }
 
     if (!existing.empty) {
       const doc = existing.docs[0];
