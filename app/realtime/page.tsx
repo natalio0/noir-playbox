@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Link from "next/link";
 import Image from "next/image";
@@ -89,6 +89,9 @@ type RealtimeDevice = {
 export default function RealtimePage() {
   const preferences = useDashboardPreferences();
 
+  const overviewRequestInFlightRef = useRef<Promise<void> | null>(null);
+  const overviewLastRequestAtRef = useRef(0);
+
   const [collapsed, setCollapsed] = useState(false);
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -129,61 +132,101 @@ export default function RealtimePage() {
         return;
       }
 
+      /*
+       * Dedupe:
+       * - jika request overview masih berjalan, tunggu request yang sama
+       * - auto refresh yang datang <3 detik dari request sebelumnya dilewati
+       * - manual refresh boleh melewati cooldown, tetapi tetap tidak overlap
+       */
+      if (overviewRequestInFlightRef.current) {
+        await overviewRequestInFlightRef.current;
+        return;
+      }
+
+      const now = Date.now();
+      const cooldownMs = 3000;
+
+      if (
+        !manual &&
+        now - overviewLastRequestAtRef.current < cooldownMs
+      ) {
+        return;
+      }
+
+      overviewLastRequestAtRef.current = now;
+
       if (manual) {
         setRefreshing(true);
       }
 
-      try {
-        const idToken = await user.getIdToken();
+      const requestPromise = (async () => {
+        try {
+          const idToken = await user.getIdToken();
 
-        const response = await fetch("/api/realtime/overview", {
-          cache: "no-store",
-          headers: {
-            Authorization: `Bearer ${idToken}`,
-          },
-        });
+          const response = await fetch("/api/realtime/overview", {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+            },
+          });
 
-        const data = await response.json();
+          const data = await response.json();
 
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Gagal mengambil realtime overview");
-        }
-
-        const registry = (data.registryDevices ?? []) as RegistryDevice[];
-        const realtime = (data.devices ?? []) as RealtimeDevice[];
-
-        setRegistryDevices(registry);
-
-        setDevices(() => {
-          const next: Record<string, RealtimeDevice> = {};
-
-          for (const device of realtime) {
-            const id = String(device.id).toUpperCase();
-
-            next[id] = {
-              ...device,
-              id,
-              state: device.state
-                ? {
-                    ...device.state,
-                    countdown: device.session
-                      ? calculateSessionCountdown(device.session)
-                      : Math.max(0, Number(device.state.countdown ?? 0)),
-                  }
-                : null,
-            };
+          if (!response.ok || !data.success) {
+            throw new Error(
+              data.error || "Gagal mengambil realtime overview",
+            );
           }
 
-          return next;
-        });
+          const registry = (data.registryDevices ?? []) as RegistryDevice[];
+          const realtime = (data.devices ?? []) as RealtimeDevice[];
 
-        setLastSynced(
-          data.updatedAt ? new Date(data.updatedAt) : new Date(),
-        );
-      } catch (error) {
-        console.error("FETCH REALTIME OVERVIEW ERROR:", error);
+          setRegistryDevices(registry);
+
+          setDevices(() => {
+            const next: Record<string, RealtimeDevice> = {};
+
+            for (const device of realtime) {
+              const id = String(device.id).toUpperCase();
+
+              next[id] = {
+                ...device,
+                id,
+                state: device.state
+                  ? {
+                      ...device.state,
+                      countdown: device.session
+                        ? calculateSessionCountdown(device.session)
+                        : Math.max(
+                            0,
+                            Number(device.state.countdown ?? 0),
+                          ),
+                    }
+                  : null,
+              };
+            }
+
+            return next;
+          });
+
+          setLastSynced(
+            data.updatedAt ? new Date(data.updatedAt) : new Date(),
+          );
+        } catch (error) {
+          console.error("FETCH REALTIME OVERVIEW ERROR:", error);
+        } finally {
+          setRefreshing(false);
+        }
+      })();
+
+      overviewRequestInFlightRef.current = requestPromise;
+
+      try {
+        await requestPromise;
       } finally {
-        setRefreshing(false);
+        if (overviewRequestInFlightRef.current === requestPromise) {
+          overviewRequestInFlightRef.current = null;
+        }
       }
     },
     [],

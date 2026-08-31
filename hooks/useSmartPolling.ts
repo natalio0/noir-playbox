@@ -23,6 +23,13 @@ export function useSmartPolling(
   useEffect(() => {
     if (!enabled || intervalMs <= 0) return;
 
+    /*
+     * Anggap hook baru saja sinkron saat dipasang.
+     * Ini mencegah event window focus/visibility tepat setelah mount
+     * memicu request tambahan sebelum interval polling pertama.
+     */
+    lastRunRef.current = Date.now();
+
     let timer: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
 
