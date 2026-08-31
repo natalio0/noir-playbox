@@ -118,254 +118,14 @@ export default function RealtimePage() {
   }, []);
 
   /* =======================================================
-     FETCH ONE DEVICE
-  ======================================================= */
-
-  const fetchDevice = useCallback(
-    async (deviceId: string): Promise<RealtimeDevice> => {
-      const normalizedId = deviceId.toUpperCase();
-
-      try {
-        const user = auth.currentUser;
-
-        if (!user) {
-          return {
-            id: normalizedId,
-
-            status: "OFFLINE",
-
-            online: false,
-
-            state: null,
-
-            loading: false,
-
-            error: "User belum login",
-
-            accessDenied: false,
-
-            updatedAt: null,
-
-            session: null,
-          };
-        }
-
-        const idToken = await user.getIdToken();
-
-        const response = await fetch(
-          `/api/tuya/device/${encodeURIComponent(normalizedId)}`,
-          {
-            cache: "no-store",
-
-            headers: {
-              Authorization: `Bearer ${idToken}`,
-            },
-          },
-        );
-
-        const data = await response.json();
-
-        /* ===================================================
-           USER TIDAK PUNYA AKSES KE DEVICE
-        =================================================== */
-
-        if (response.status === 403) {
-          return {
-            id: normalizedId,
-
-            status: "OFFLINE",
-
-            online: false,
-
-            state: null,
-
-            loading: false,
-
-            error: null,
-
-            accessDenied: true,
-
-            updatedAt: null,
-
-            session: null,
-          };
-        }
-
-        /* ===================================================
-           DEVICE OFFLINE
-        =================================================== */
-
-        if (
-          data.online === false ||
-          String(data.error ?? "")
-            .toLowerCase()
-            .includes("offline") ||
-          String(data.error ?? "").includes("40000801")
-        ) {
-          return {
-            id: normalizedId,
-
-            status: "OFFLINE",
-
-            online: false,
-
-            state: null,
-
-            loading: false,
-
-            error: null,
-
-            accessDenied: false,
-
-            updatedAt: data.updatedAt ?? new Date().toISOString(),
-
-            session: null,
-          };
-        }
-
-        /* ===================================================
-           ERROR LAIN
-        =================================================== */
-
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Gagal mengambil status device");
-        }
-
-        /* ===================================================
-           ONLINE
-        =================================================== */
-
-        const state = data.state as DeviceState;
-
-        return {
-          id: normalizedId,
-          status: state.switch ? "ON" : "OFF",
-          online: true,
-          state,
-          loading: false,
-          error: null,
-          accessDenied: false,
-          updatedAt: data.updatedAt ?? new Date().toISOString(),
-
-          session: null,
-        };
-      } catch (error) {
-        console.error(`FETCH ${normalizedId} ERROR:`, error);
-
-        return {
-          id: normalizedId,
-
-          status: "OFFLINE",
-
-          online: false,
-
-          state: null,
-
-          loading: false,
-
-          error:
-            error instanceof Error ? error.message : "Gagal mengambil device",
-
-          accessDenied: false,
-
-          updatedAt: null,
-
-          session: null,
-        };
-      }
-    },
-    [],
-  );
-
-  /* =======================================================
-     FETCH ACTIVE SESSION
-  ======================================================= */
-
-  const fetchActiveSession = useCallback(
-    async (deviceId: string): Promise<ActiveSession | null> => {
-      const user = auth.currentUser;
-
-      if (!user) {
-        return null;
-      }
-
-      try {
-        const idToken = await user.getIdToken();
-
-        const response = await fetch(
-          `/api/sessions/active?deviceId=${encodeURIComponent(deviceId)}`,
-          {
-            cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${idToken}`,
-            },
-          },
-        );
-
-        const data = await response.json();
-
-        if (response.status === 403) {
-          return null;
-        }
-
-        if (!response.ok || !data.success) {
-          throw new Error(data.error || "Gagal mengambil active session");
-        }
-
-        if (!data.active || !data.session) {
-          return null;
-        }
-
-        return data.session as ActiveSession;
-      } catch (error) {
-        console.error(`FETCH SESSION ${deviceId} ERROR:`, error);
-
-        return null;
-      }
-    },
-    [],
-  );
-
-  /* =======================================================
-     FETCH DEVICE REGISTRY FROM FIRESTORE
-  ======================================================= */
-
-  const fetchRegistryDevices = useCallback(async (): Promise<RegistryDevice[]> => {
-    const user = auth.currentUser;
-
-    if (!user) {
-      return [];
-    }
-
-    const idToken = await user.getIdToken();
-
-    const response = await fetch("/api/devices", {
-      cache: "no-store",
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-      },
-    });
-
-    const data = await response.json();
-
-    if (!response.ok || !data.success) {
-      throw new Error(data.error || "Gagal mengambil daftar PlayBox");
-    }
-
-    const list = (data.devices ?? []) as RegistryDevice[];
-
-    setRegistryDevices(list);
-
-    return list;
-  }, []);
-
-  /* =======================================================
-     FETCH ALL DEVICES
+     FETCH REALTIME OVERVIEW - BATCH
   ======================================================= */
 
   const fetchAllDevices = useCallback(
     async (manual = false) => {
-      if (!auth.currentUser) {
+      const user = auth.currentUser;
+
+      if (!user) {
         return;
       }
 
@@ -373,94 +133,60 @@ export default function RealtimePage() {
         setRefreshing(true);
       }
 
-      const registry = await fetchRegistryDevices();
+      try {
+        const idToken = await user.getIdToken();
 
-      const deviceIds = registry.map((device) =>
-        String(device.deviceId).toUpperCase(),
-      );
+        const response = await fetch("/api/realtime/overview", {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+        });
 
-      /*
-       * Tandai loading hanya kalau device belum pernah
-       * punya data sebelumnya.
-       */
+        const data = await response.json();
 
-      setDevices((current) => {
-        const next = {
-          ...current,
-        };
-
-        for (const id of deviceIds) {
-          if (!next[id]) {
-            next[id] = {
-              id,
-
-              status: "OFFLINE",
-
-              online: false,
-
-              state: null,
-
-              loading: true,
-
-              error: null,
-
-              accessDenied: false,
-
-              updatedAt: null,
-
-              session: null,
-            };
-          }
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || "Gagal mengambil realtime overview");
         }
 
-        return next;
-      });
+        const registry = (data.registryDevices ?? []) as RegistryDevice[];
+        const realtime = (data.devices ?? []) as RealtimeDevice[];
 
-      try {
-        /*
-         * Fetch semua PS paralel
-         */
+        setRegistryDevices(registry);
 
-        const results = await Promise.all(
-          deviceIds.map(async (deviceId) => {
-            const [device, session] = await Promise.all([
-              fetchDevice(deviceId),
-              fetchActiveSession(deviceId),
-            ]);
+        setDevices(() => {
+          const next: Record<string, RealtimeDevice> = {};
 
-            return {
+          for (const device of realtime) {
+            const id = String(device.id).toUpperCase();
+
+            next[id] = {
               ...device,
-              session,
+              id,
               state: device.state
                 ? {
                     ...device.state,
-                    countdown: session
-                      ? calculateSessionCountdown(session)
+                    countdown: device.session
+                      ? calculateSessionCountdown(device.session)
                       : Math.max(0, Number(device.state.countdown ?? 0)),
                   }
                 : null,
             };
-          }),
-        );
-
-        setDevices((current) => {
-          const next = {
-            ...current,
-          };
-
-          for (const result of results) {
-            next[result.id] = result;
           }
 
           return next;
         });
 
-        setLastSynced(new Date());
+        setLastSynced(
+          data.updatedAt ? new Date(data.updatedAt) : new Date(),
+        );
+      } catch (error) {
+        console.error("FETCH REALTIME OVERVIEW ERROR:", error);
       } finally {
         setRefreshing(false);
       }
     },
-    [fetchDevice, fetchActiveSession, fetchRegistryDevices],
+    [],
   );
 
   /* =======================================================
