@@ -148,9 +148,15 @@ export default function AdminPage() {
       clearTimeout(timeout);
   }, [fetchAlerts]);
 
+  /*
+   * Alert PREPARING punya threshold 45/60 menit.
+   * Poll 30 detik cukup responsif sekaligus mengurangi Firestore reads.
+   * Watchdog berjalan terpisah dan tidak dipengaruhi interval ini.
+   */
   useSmartPolling(() => fetchAlerts(), {
     enabled: preferences.autoRefresh,
-    intervalMs: preferences.refreshInterval * 1000,
+    intervalMs:
+      Math.max(preferences.refreshInterval, 30) * 1000,
   });
 
   return (

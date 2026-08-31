@@ -11,6 +11,10 @@ import {
 import { onAuthStateChanged, User } from "firebase/auth";
 
 import { auth } from "@/lib/firebase";
+import {
+  clearAuthenticatedProfileCache,
+  getAuthenticatedProfile,
+} from "@/lib/auth-profile-client";
 
 import type { UserProfile } from "@/lib/auth";
 
@@ -33,41 +37,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setLoading(true);
+      setUser(firebaseUser);
+
+      if (!firebaseUser) {
+        clearAuthenticatedProfileCache();
+        setProfile(null);
+        setLoading(false);
+        return;
+      }
+
       try {
-        setUser(firebaseUser);
+        const nextProfile =
+          await getAuthenticatedProfile(firebaseUser);
 
-        if (!firebaseUser) {
-          setProfile(null);
-          setLoading(false);
-          return;
-        }
-
-        console.log("🔥 AUTH USER:", firebaseUser.uid);
-
-        const idToken = await firebaseUser.getIdToken();
-
-        const response = await fetch("/api/auth/profile", {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${idToken}`,
-          },
-          cache: "no-store",
-        });
-
-        const data = await response.json();
-
-        console.log("🔥 AUTH PROFILE:", data);
-
-        if (response.ok && data.success) {
-          setProfile(data.profile);
-        } else {
-          console.error("PROFILE ERROR:", data.error);
-
-          setProfile(null);
-        }
+        setProfile(nextProfile);
       } catch (error) {
         console.error("AUTH PROFILE ERROR:", error);
-
         setProfile(null);
       } finally {
         setLoading(false);

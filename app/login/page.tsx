@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { signInWithEmailAndPassword, onAuthStateChanged } from "firebase/auth";
 
 import { auth } from "@/lib/firebase";
+import { getAuthenticatedProfile } from "@/lib/auth-profile-client";
 
 import { Lock, Mail, Loader2, LogIn, AlertCircle } from "lucide-react";
 
@@ -72,40 +73,18 @@ export default function LoginPage() {
 
       console.log("🔥 FIREBASE LOGIN SUCCESS:", firebaseUser.uid);
 
-      /* =================================================
-         GET ID TOKEN
-      ================================================= */
-
-      const idToken = await firebaseUser.getIdToken();
-
-      console.log("🔥 LOGIN SUCCESS:", firebaseUser.uid);
-
-      const response = await fetch("/api/auth/profile", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-        },
-        cache: "no-store",
-      });
-      const data = await response.json();
-
-      console.log("🔥 USER PROFILE RESPONSE:", data);
-
-      /* =================================================
-         PROFILE INVALID
-      ================================================= */
-
-      if (!response.ok || !data.success || !data.profile) {
-        await auth.signOut();
-
-        throw new Error(data.error || "Profile user belum dikonfigurasi.");
-      }
+      /*
+       * Login page dan AuthProvider memakai request profile yang sama.
+       * Jika onAuthStateChanged berjalan bersamaan, request tidak diduplikasi.
+       */
+      const profile =
+        await getAuthenticatedProfile(firebaseUser);
 
       /* =================================================
          ROLE
       ================================================= */
 
-      const role = data.profile.role;
+      const role = profile.role;
 
       console.log("🔥 USER ROLE:", role);
 

@@ -33,7 +33,6 @@ export async function GET(request: Request) {
 
     const uid = decodedToken.uid;
 
-    console.log("🔥 VERIFIED UID:", uid);
 
     const profile = await getServerUserProfile(uid);
 
@@ -47,10 +46,17 @@ export async function GET(request: Request) {
       );
     }
 
-    return NextResponse.json({
-      success: true,
-      profile,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        profile,
+      },
+      {
+        headers: {
+          "Cache-Control": "private, no-store, max-age=0",
+        },
+      },
+    );
   } catch (error) {
     console.error("PROFILE API ERROR:", error);
 
