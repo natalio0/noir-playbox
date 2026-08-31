@@ -82,6 +82,73 @@ type RealtimeDevice = {
   session: ActiveSession | null;
 };
 
+const REGISTRY_CACHE_PREFIX = "noir:realtime-registry:";
+const REGISTRY_CACHE_TTL_MS = 2 * 60 * 1000;
+
+type RegistryCachePayload = {
+  savedAt: number;
+  devices: RegistryDevice[];
+};
+
+function readRegistryCache(uid: string): RegistryDevice[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(
+      `${REGISTRY_CACHE_PREFIX}${uid}`,
+    );
+
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as RegistryCachePayload;
+
+    if (
+      !parsed ||
+      !Array.isArray(parsed.devices) ||
+      !Number.isFinite(parsed.savedAt)
+    ) {
+      return [];
+    }
+
+    if (Date.now() - parsed.savedAt > REGISTRY_CACHE_TTL_MS) {
+      window.sessionStorage.removeItem(
+        `${REGISTRY_CACHE_PREFIX}${uid}`,
+      );
+
+      return [];
+    }
+
+    return parsed.devices;
+  } catch {
+    return [];
+  }
+}
+
+function writeRegistryCache(uid: string, devices: RegistryDevice[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const payload: RegistryCachePayload = {
+      savedAt: Date.now(),
+      devices,
+    };
+
+    window.sessionStorage.setItem(
+      `${REGISTRY_CACHE_PREFIX}${uid}`,
+      JSON.stringify(payload),
+    );
+  } catch {
+    // Cache browser hanya optimasi UX. Kegagalan cache tidak boleh
+    // memengaruhi realtime monitoring.
+  }
+}
+
 /* =========================================================
    PAGE
 ========================================================= */
@@ -91,6 +158,7 @@ export default function RealtimePage() {
 
   const overviewRequestInFlightRef = useRef<Promise<void> | null>(null);
   const overviewLastRequestAtRef = useRef(0);
+  const registryRequestInFlightRef = useRef<Promise<void> | null>(null);
 
   const [collapsed, setCollapsed] = useState(false);
 
@@ -99,6 +167,12 @@ export default function RealtimePage() {
   const [refreshing, setRefreshing] = useState(false);
 
   const [authReady, setAuthReady] = useState(false);
+
+  const [registryLookupDone, setRegistryLookupDone] = useState(false);
+
+  const [initialOverviewDone, setInitialOverviewDone] = useState(false);
+
+  const [initialLoadError, setInitialLoadError] = useState<string | null>(null);
 
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
@@ -111,13 +185,113 @@ export default function RealtimePage() {
   ======================================================= */
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, () => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        setRegistryDevices([]);
+        setDevices({});
+        setRegistryLookupDone(true);
+        setInitialOverviewDone(true);
+        setAuthReady(true);
+        return;
+      }
+
+      const cachedRegistry = readRegistryCache(user.uid);
+
+      if (cachedRegistry.length > 0) {
+        /*
+         * Perceived performance:
+         * daftar card bisa tampil langsung dari cache browser.
+         * Status Tuya tetap divalidasi oleh overview request.
+         */
+        setRegistryDevices(cachedRegistry);
+      }
+
       setAuthReady(true);
     });
 
     return () => {
       unsubscribe();
     };
+  }, []);
+
+  /* =======================================================
+     FAST DEVICE DISCOVERY
+
+     /api/devices tidak menunggu Tuya. Tujuannya hanya agar card
+     unit tampil secepat mungkin sebagai "LOADING/CHECKING".
+     Status final tetap berasal dari /api/realtime/overview.
+  ======================================================= */
+
+  const preloadRegistryDevices = useCallback(async () => {
+    const user = auth.currentUser;
+
+    if (!user) {
+      setRegistryLookupDone(true);
+      return;
+    }
+
+    const cachedRegistry = readRegistryCache(user.uid);
+
+    if (cachedRegistry.length > 0) {
+      setRegistryDevices(cachedRegistry);
+      setRegistryLookupDone(true);
+
+      /*
+       * Cache masih fresh (TTL 2 menit), jadi tidak perlu menambah
+       * satu request /api/devices. Overview tetap akan memvalidasi
+       * registry + status di background.
+       */
+      return;
+    }
+
+    if (registryRequestInFlightRef.current) {
+      await registryRequestInFlightRef.current;
+      return;
+    }
+
+    const requestPromise = (async () => {
+      try {
+        const idToken = await user.getIdToken();
+
+        const response = await fetch("/api/devices", {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || "Gagal mengambil daftar device");
+        }
+
+        const registry = (data.devices ?? []) as RegistryDevice[];
+
+        setRegistryDevices(registry);
+        writeRegistryCache(user.uid, registry);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Gagal mengambil daftar device";
+
+        console.error("FAST DEVICE DISCOVERY ERROR:", error);
+        setInitialLoadError(message);
+      } finally {
+        setRegistryLookupDone(true);
+      }
+    })();
+
+    registryRequestInFlightRef.current = requestPromise;
+
+    try {
+      await requestPromise;
+    } finally {
+      if (registryRequestInFlightRef.current === requestPromise) {
+        registryRequestInFlightRef.current = null;
+      }
+    }
   }, []);
 
   /* =======================================================
@@ -182,6 +356,9 @@ export default function RealtimePage() {
           const realtime = (data.devices ?? []) as RealtimeDevice[];
 
           setRegistryDevices(registry);
+          writeRegistryCache(user.uid, registry);
+          setRegistryLookupDone(true);
+          setInitialLoadError(null);
 
           setDevices(() => {
             const next: Record<string, RealtimeDevice> = {};
@@ -213,9 +390,16 @@ export default function RealtimePage() {
             data.updatedAt ? new Date(data.updatedAt) : new Date(),
           );
         } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Gagal mengambil realtime overview";
+
           console.error("FETCH REALTIME OVERVIEW ERROR:", error);
+          setInitialLoadError((current) => current ?? message);
         } finally {
           setRefreshing(false);
+          setInitialOverviewDone(true);
         }
       })();
 
@@ -242,13 +426,19 @@ export default function RealtimePage() {
     }
 
     const timeout = setTimeout(() => {
+      /*
+       * Jalan paralel:
+       * - registry cepat untuk render card
+       * - overview lengkap untuk status Tuya + session
+       */
+      void preloadRegistryDevices();
       void fetchAllDevices();
     }, 0);
 
     return () => {
       clearTimeout(timeout);
     };
-  }, [authReady, fetchAllDevices]);
+  }, [authReady, fetchAllDevices, preloadRegistryDevices]);
 
   /* =======================================================
      DATA POLLING - SETTINGS CONTROLLED
@@ -365,6 +555,28 @@ export default function RealtimePage() {
       offline,
     };
   }, [devices, visiblePSBoxes]);
+
+  const discoveringDevices =
+    authReady &&
+    Boolean(auth.currentUser) &&
+    !registryLookupDone &&
+    registryDevices.length === 0;
+
+  const shouldShowNoDevice =
+    authReady &&
+    Boolean(auth.currentUser) &&
+    registryLookupDone &&
+    initialOverviewDone &&
+    visiblePSBoxes.length === 0 &&
+    !initialLoadError;
+
+  const shouldShowLoadError =
+    authReady &&
+    Boolean(auth.currentUser) &&
+    registryLookupDone &&
+    initialOverviewDone &&
+    visiblePSBoxes.length === 0 &&
+    Boolean(initialLoadError);
 
   /* =======================================================
      PAGE
@@ -488,8 +700,24 @@ export default function RealtimePage() {
               DEVICE CARDS
           ================================================= */}
 
-          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-            {visiblePSBoxes.map((psbox) => {
+          {discoveringDevices && (
+            <div>
+              <div className="mb-4 flex items-center gap-2 text-sm text-slate-500">
+                <RefreshCw size={15} className="animate-spin" />
+                Memuat unit Playbox...
+              </div>
+
+              <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <DeviceSkeleton key={index} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!discoveringDevices && (
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {visiblePSBoxes.map((psbox) => {
               const id = String(psbox.deviceId).toUpperCase();
 
               const device = devices[id];
@@ -502,15 +730,49 @@ export default function RealtimePage() {
                   compact={preferences.compactCards}
                   showOfflineWarning={preferences.showOfflineWarning}
                 />
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* =================================================
+              LOAD ERROR
+          ================================================= */}
+
+          {shouldShowLoadError && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-8 text-center shadow-sm">
+              <p className="text-sm font-semibold text-amber-800">
+                Gagal memuat unit Playbox
+              </p>
+
+              <p className="mt-1 text-sm text-amber-700">
+                {initialLoadError}
+              </p>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialLoadError(null);
+                  setRegistryLookupDone(false);
+                  setInitialOverviewDone(false);
+                  void preloadRegistryDevices();
+                  void fetchAllDevices(true);
+                }}
+                className="mt-4 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700"
+              >
+                Coba lagi
+              </button>
+            </div>
+          )}
 
           {/* =================================================
               NO DEVICE
+
+              Hanya tampil setelah discovery + overview selesai.
+              Jadi tidak ada lagi false "Tidak ada device" saat loading.
           ================================================= */}
 
-          {authReady && visiblePSBoxes.length === 0 && (
+          {shouldShowNoDevice && (
             <div className="rounded-xl border border-slate-200 bg-white p-10 text-center shadow-sm">
               <p className="text-sm font-semibold text-slate-700">
                 Tidak ada device
@@ -523,6 +785,33 @@ export default function RealtimePage() {
           )}
         </div>
       </main>
+    </div>
+  );
+}
+
+/* =========================================================
+   DEVICE SKELETON
+========================================================= */
+
+function DeviceSkeleton() {
+  return (
+    <div className="animate-pulse rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="h-3 w-16 rounded bg-slate-200" />
+          <div className="mt-2 h-6 w-20 rounded bg-slate-200" />
+        </div>
+
+        <div className="h-7 w-20 rounded-full bg-slate-100" />
+      </div>
+
+      <div className="mt-5 h-40 rounded-xl border border-slate-100 bg-slate-100" />
+
+      <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="h-14 rounded-lg bg-slate-100" />
+        <div className="h-14 rounded-lg bg-slate-100" />
+        <div className="h-14 rounded-lg bg-slate-100" />
+      </div>
     </div>
   );
 }
