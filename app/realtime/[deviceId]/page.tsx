@@ -76,6 +76,7 @@ type Session = {
 
 const TUYA_REFRESH_MIN_GAP_MS = 3_000;
 const TUYA_VERIFY_DELAY_MS = 1_200;
+const TUYA_ACTION_POLL_PAUSE_MS = 4_000;
 
 /* =========================================================
    PAGE
@@ -150,10 +151,12 @@ export default function PSDetailPage({
    * Dedupe status Tuya:
    * - hanya satu GET /api/tuya/device yang boleh in-flight
    * - polling biasa tidak boleh menembak lagi <3 detik setelah request terakhir
+   * - setiap aksi Tuya mem-pause polling 4 detik
    * - verification setelah command memakai satu timer yang bisa diganti
    */
   const tuyaFetchInFlightRef = useRef<Promise<void> | null>(null);
   const lastTuyaRequestAtRef = useRef<number>(0);
+  const tuyaPollingPausedUntilRef = useRef<number>(0);
   const tuyaVerificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -290,6 +293,16 @@ export default function PSDetailPage({
     }
   }, []);
 
+  const pauseTuyaPolling = useCallback(
+    (durationMs = TUYA_ACTION_POLL_PAUSE_MS) => {
+      tuyaPollingPausedUntilRef.current = Math.max(
+        tuyaPollingPausedUntilRef.current,
+        Date.now() + durationMs,
+      );
+    },
+    [],
+  );
+
   /* =======================================================
      FETCH TUYA
   ======================================================= */
@@ -310,6 +323,14 @@ export default function PSDetailPage({
       }
 
       const now = Date.now();
+
+      /*
+       * Setelah aksi Tuya, polling reguler dipause sementara.
+       * Verification command memakai force=true sehingga tetap boleh jalan.
+       */
+      if (!options?.force && now < tuyaPollingPausedUntilRef.current) {
+        return;
+      }
 
       /*
        * Smart polling/focus refresh tidak perlu memukul Tuya lagi bila baru
@@ -426,6 +447,12 @@ export default function PSDetailPage({
         return;
       }
 
+      /*
+       * Satu aksi = satu verification. Selama window ini polling reguler
+       * tidak boleh membuat GET tambahan yang berdekatan.
+       */
+      pauseTuyaPolling(TUYA_ACTION_POLL_PAUSE_MS);
+
       if (tuyaVerificationTimerRef.current) {
         clearTimeout(tuyaVerificationTimerRef.current);
       }
@@ -435,7 +462,7 @@ export default function PSDetailPage({
         void fetchDeviceState(deviceId, { force: true });
       }, delayMs);
     },
-    [fetchDeviceState],
+    [fetchDeviceState, pauseTuyaPolling],
   );
 
   useEffect(() => {
@@ -593,6 +620,8 @@ export default function PSDetailPage({
 
       void (async () => {
         try {
+          pauseTuyaPolling();
+
           const user = auth.currentUser;
 
           if (!user) {
@@ -856,6 +885,19 @@ export default function PSDetailPage({
     try {
       setControlLoading(true);
       setError(null);
+      pauseTuyaPolling();
+
+      /*
+       * FIREBASE FIRST:
+       * catat SHUTDOWN_ACTIVE lebih dulu. Dengan begitu refresh/logout di
+       * tengah proses tidak pernah menghilangkan state shutdown.
+       */
+      const createdShutdown = await startShutdownMode(
+        rawDeviceId,
+        shutdownMode.sourceSessionId,
+      );
+
+      setShutdownMode(createdShutdown);
 
       const user = auth.currentUser;
 
@@ -866,7 +908,7 @@ export default function PSDetailPage({
       const idToken = await user.getIdToken();
 
       /*
-       * Nyalakan monitor secara eksplisit untuk shutdown.
+       * Setelah audit persistent, baru nyalakan monitor.
        * Tidak membuat PREPARING dan tidak membuat billing.
        */
 
@@ -887,16 +929,10 @@ export default function PSDetailPage({
 
       if (!response.ok || !data.success) {
         throw new Error(
-          data.error || "Gagal menyalakan monitor untuk shutdown",
+          data.error ||
+            "Shutdown sudah tercatat, tetapi monitor gagal dinyalakan",
         );
       }
-
-      const createdShutdown = await startShutdownMode(
-        rawDeviceId,
-        shutdownMode.sourceSessionId,
-      );
-
-      setShutdownMode(createdShutdown);
 
       setDeviceOnline(true);
 
@@ -921,13 +957,85 @@ export default function PSDetailPage({
         "Shutdown Mode aktif. Monitor dinyalakan untuk mematikan PS4 secara normal.",
       );
 
-      /* Status Tuya diverifikasi background; tombol tidak perlu menunggu GET. */
       scheduleTuyaVerification(rawDeviceId);
     } catch (error) {
       console.error("START SHUTDOWN MODE ERROR:", error);
 
       setError(
         error instanceof Error ? error.message : "Gagal memulai Shutdown Mode",
+      );
+    } finally {
+      setControlLoading(false);
+    }
+  }
+
+  async function retryShutdownMonitorOn() {
+    if (!rawDeviceId || shutdownMode?.status !== "SHUTDOWN_ACTIVE") {
+      return;
+    }
+
+    try {
+      setControlLoading(true);
+      setError(null);
+      pauseTuyaPolling();
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        throw new Error("User belum login");
+      }
+
+      const idToken = await user.getIdToken();
+
+      const response = await fetch("/api/tuya/control", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          deviceId: rawDeviceId,
+          action: "ON",
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Gagal menyalakan monitor");
+      }
+
+      setDeviceOnline(true);
+      setDeviceState((current) =>
+        current
+          ? {
+              ...current,
+              switch: true,
+              countdown: 0,
+            }
+          : {
+              switch: true,
+              countdown: 0,
+              power: 0,
+              current: 0,
+              voltage: 0,
+            },
+      );
+
+      showNotification(
+        "success",
+        "Monitor aktif kembali. Silakan matikan PS4 secara normal.",
+      );
+
+      scheduleTuyaVerification(rawDeviceId);
+    } catch (error) {
+      console.error("RETRY SHUTDOWN MONITOR ERROR:", error);
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Gagal menyalakan monitor untuk Shutdown Mode",
       );
     } finally {
       setControlLoading(false);
@@ -942,6 +1050,7 @@ export default function PSDetailPage({
     try {
       setControlLoading(true);
       setError(null);
+      pauseTuyaPolling();
 
       const user = auth.currentUser;
 
@@ -1043,6 +1152,7 @@ export default function PSDetailPage({
     try {
       setControlLoading(true);
       setError(null);
+      pauseTuyaPolling();
 
       const selectedPackage =
         durationMinutes !== undefined
@@ -1061,6 +1171,12 @@ export default function PSDetailPage({
         requestedAction: "ON" | "OFF" | "TIMER" | "ADD_TIME" | "STOP",
         options?: { durationMinutes?: number; currentCountdown?: number },
       ) => {
+        /*
+         * Mulai/extend action window tepat sebelum command dikirim agar smart
+         * polling tidak bertabrakan dengan command atau verification.
+         */
+        pauseTuyaPolling();
+
         const response = await fetch("/api/tuya/control", {
           method: "POST",
           headers: {
@@ -1719,8 +1835,9 @@ export default function PSDetailPage({
                   </p>
 
                   <p className="mt-1 text-xs leading-5 text-violet-600">
-                    Monitor dinyalakan hanya untuk mematikan PS4 secara normal.
-                    Mode ini tidak masuk billing dan tidak dianggap PREPARING.
+                    {isOn
+                      ? "Monitor dinyalakan hanya untuk mematikan PS4 secara normal. Mode ini tidak masuk billing dan tidak dianggap PREPARING."
+                      : "Shutdown sudah tercatat di Firebase, tetapi monitor masih OFF. Nyalakan monitor untuk melanjutkan shutdown PS4."}
                   </p>
 
                   <p className="mt-2 text-xs font-semibold text-violet-700">
@@ -1730,11 +1847,21 @@ export default function PSDetailPage({
 
                 <button
                   type="button"
-                  onClick={finishOperationalShutdownMode}
+                  onClick={
+                    isOn
+                      ? finishOperationalShutdownMode
+                      : retryShutdownMonitorOn
+                  }
                   disabled={controlLoading || isOffline}
                   className="shrink-0 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {controlLoading ? "Mematikan Monitor..." : "SELESAI SHUTDOWN"}
+                  {controlLoading
+                    ? isOn
+                      ? "Mematikan Monitor..."
+                      : "Menyalakan Monitor..."
+                    : isOn
+                      ? "SELESAI SHUTDOWN"
+                      : "NYALAKAN MONITOR"}
                 </button>
               </div>
             </div>
