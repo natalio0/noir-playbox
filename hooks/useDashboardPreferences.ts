@@ -7,6 +7,7 @@ export type DashboardPreferences = {
   refreshInterval: number;
   showOfflineWarning: boolean;
   compactCards: boolean;
+  tuyaApiSaver: boolean;
 };
 
 export const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = {
@@ -14,6 +15,7 @@ export const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = {
   refreshInterval: 15,
   showOfflineWarning: true,
   compactCards: false,
+  tuyaApiSaver: true,
 };
 
 export const DASHBOARD_SETTINGS_KEY = "noir-playbox-dashboard-settings";
@@ -53,6 +55,11 @@ function readPreferences(): DashboardPreferences {
         typeof parsed?.compactCards === "boolean"
           ? parsed.compactCards
           : DEFAULT_DASHBOARD_PREFERENCES.compactCards,
+
+      tuyaApiSaver:
+        typeof parsed?.tuyaApiSaver === "boolean"
+          ? parsed.tuyaApiSaver
+          : DEFAULT_DASHBOARD_PREFERENCES.tuyaApiSaver,
     };
   } catch (error) {
     console.error("READ DASHBOARD SETTINGS ERROR:", error);

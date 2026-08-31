@@ -21,6 +21,7 @@ import Header from "@/components/layout/Header";
 import { auth } from "@/lib/firebase";
 import { useDashboardPreferences } from "@/hooks/useDashboardPreferences";
 import { useSmartPolling } from "@/hooks/useSmartPolling";
+import { TUYA_API_SAVER_DETAIL_INTERVAL_MS } from "@/lib/tuya-api-saver";
 import {
   completeShutdownMode,
   endPreparingWithoutBilling,
@@ -611,7 +612,9 @@ export default function PSDetailPage({
 
   useSmartPolling(() => fetchDeviceState(rawDeviceId), {
     enabled: Boolean(rawDeviceId) && preferences.autoRefresh,
-    intervalMs: preferences.refreshInterval * 1000,
+    intervalMs: preferences.tuyaApiSaver
+      ? TUYA_API_SAVER_DETAIL_INTERVAL_MS
+      : preferences.refreshInterval * 1000,
   });
 
   /* =======================================================

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import {
   Building2,
   Check,
+  Gauge,
   Mail,
   Monitor,
   RefreshCw,
@@ -31,6 +32,7 @@ type DashboardPreferences = {
   refreshInterval: number;
   showOfflineWarning: boolean;
   compactCards: boolean;
+  tuyaApiSaver: boolean;
 };
 
 /* =========================================================
@@ -42,6 +44,7 @@ const DEFAULT_PREFERENCES: DashboardPreferences = {
   refreshInterval: 15,
   showOfflineWarning: true,
   compactCards: false,
+  tuyaApiSaver: true,
 };
 
 /* =========================================================
@@ -419,6 +422,21 @@ export default function SettingsPage() {
                     }
                   />
 
+                  {/* TUYA API SAVER */}
+
+                  <SettingToggle
+                    icon={<Gauge size={17} />}
+                    title="Tuya API Saver"
+                    description="Hemat kuota Tuya Cloud: overview 15 menit, detail 10 menit. Action ON/OFF/TIMER tetap realtime."
+                    checked={preferences.tuyaApiSaver}
+                    onChange={(checked) =>
+                      setPreferences((current) => ({
+                        ...current,
+                        tuyaApiSaver: checked,
+                      }))
+                    }
+                  />
+
                   {/* OFFLINE WARNING */}
 
                   <SettingToggle
@@ -458,7 +476,7 @@ export default function SettingsPage() {
                   </label>
 
                   <p className="mt-1 text-xs text-slate-400">
-                    Interval polling Tuya Cloud.
+                    Interval polling normal. Saat Tuya API Saver aktif, overview/detail memakai interval hemat otomatis.
                   </p>
 
                   <div className="mt-4 grid grid-cols-3 gap-2">
