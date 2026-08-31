@@ -10,7 +10,7 @@ function roundedMs(value: number) {
 }
 
 function diagnosticsEnabled() {
-  return process.env.NOIR_PERF_DIAGNOSTICS !== "false";
+  return process.env.NOIR_PERF_LOGS === "true";
 }
 
 export function createPerfTrace(operation: string, baseMeta: PerfMeta = {}) {
