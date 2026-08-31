@@ -74,6 +74,9 @@ type Session = {
   totalPrice: number;
 };
 
+const TUYA_REFRESH_MIN_GAP_MS = 3_000;
+const TUYA_VERIFY_DELAY_MS = 1_200;
+
 /* =========================================================
    PAGE
 ========================================================= */
@@ -142,6 +145,18 @@ export default function PSDetailPage({
   const countdownRef = useRef(0);
 
   const lastTuyaSyncRef = useRef<number>(0);
+
+  /*
+   * Dedupe status Tuya:
+   * - hanya satu GET /api/tuya/device yang boleh in-flight
+   * - polling biasa tidak boleh menembak lagi <3 detik setelah request terakhir
+   * - verification setelah command memakai satu timer yang bisa diganti
+   */
+  const tuyaFetchInFlightRef = useRef<Promise<void> | null>(null);
+  const lastTuyaRequestAtRef = useRef<number>(0);
+  const tuyaVerificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const handleExpiredSessionRef = useRef<(sessionId: string) => void>(() => {});
 
@@ -279,106 +294,156 @@ export default function PSDetailPage({
      FETCH TUYA
   ======================================================= */
 
-  const fetchDeviceState = useCallback(async (deviceId: string) => {
-    try {
-      /*
-       * ===================================================
-       * FIREBASE AUTH
-       * ===================================================
-       */
-
-      const user = auth.currentUser;
-
-      if (!user) {
-        throw new Error("User belum login");
-      }
-
-      /*
-       * Ambil Firebase ID Token
-       */
-
-      const idToken = await user.getIdToken();
-
-      /*
-       * ===================================================
-       * REQUEST TUYA API
-       * ===================================================
-       */
-
-      const response = await fetch(`/api/tuya/device/${deviceId}`, {
-        cache: "no-store",
-
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-        },
-      });
-
-      const data = await response.json();
-
-      console.log("TUYA DEVICE RESPONSE:", data);
-
-      if (!response.ok || !data.success) {
-        const message = String(data.error ?? "Gagal mengambil status device");
-
-        if (
-          message.toLowerCase().includes("offline") ||
-          message.includes("40000801")
-        ) {
-          setDeviceOnline(false);
-          setDeviceState(null);
-          if (!sessionRef.current) {
-            countdownRef.current = 0;
-            setLiveCountdown(0);
-          }
-          setError(null);
-
-          return;
-        }
-
-        throw new Error(message);
-      }
-
-      if (data.online === false || !data.state) {
-        setDeviceOnline(false);
-        setDeviceState(null);
-        if (!sessionRef.current) {
-          countdownRef.current = 0;
-          setLiveCountdown(0);
-        }
-        setError(null);
-
+  const fetchDeviceState = useCallback(
+    async (deviceId: string, options?: { force?: boolean }) => {
+      if (!deviceId) {
         return;
       }
 
-      setDeviceOnline(true);
+      /*
+       * Kalau request status yang sama masih berjalan, tunggu request itu
+       * daripada membuat GET baru.
+       */
+      if (tuyaFetchInFlightRef.current) {
+        await tuyaFetchInFlightRef.current;
+        return;
+      }
 
-      const state = data.state as DeviceState;
+      const now = Date.now();
 
-      setDeviceState(state);
+      /*
+       * Smart polling/focus refresh tidak perlu memukul Tuya lagi bila baru
+       * saja ada sync. Verification command memakai force=true.
+       */
+      if (
+        !options?.force &&
+        now - lastTuyaRequestAtRef.current < TUYA_REFRESH_MIN_GAP_MS
+      ) {
+        return;
+      }
 
-      const activeSession = sessionRef.current;
+      lastTuyaRequestAtRef.current = now;
 
-      const countdown = activeSession
-        ? calculateSessionCountdown(activeSession)
-        : Math.max(0, Number(state.countdown ?? 0));
+      const request = (async () => {
+        try {
+          const user = auth.currentUser;
 
-      countdownRef.current = countdown;
-      setLiveCountdown(countdown);
+          if (!user) {
+            throw new Error("User belum login");
+          }
 
-      lastTuyaSyncRef.current = Date.now();
+          const idToken = await user.getIdToken();
 
-      setError(null);
-    } catch (error) {
-      console.error("FETCH DEVICE ERROR:", error);
+          const response = await fetch(`/api/tuya/device/${deviceId}`, {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+            },
+          });
 
-      setError(
-        error instanceof Error
-          ? error.message
-          : "Gagal mengambil status device",
-      );
-    } finally {
-      setLoading(false);
-    }
+          const data = await response.json();
+
+          if (!response.ok || !data.success) {
+            const message = String(
+              data.error ?? "Gagal mengambil status device",
+            );
+
+            if (
+              message.toLowerCase().includes("offline") ||
+              message.includes("40000801")
+            ) {
+              setDeviceOnline(false);
+              setDeviceState(null);
+
+              if (!sessionRef.current) {
+                countdownRef.current = 0;
+                setLiveCountdown(0);
+              }
+
+              setError(null);
+              return;
+            }
+
+            throw new Error(message);
+          }
+
+          if (data.online === false || !data.state) {
+            setDeviceOnline(false);
+            setDeviceState(null);
+
+            if (!sessionRef.current) {
+              countdownRef.current = 0;
+              setLiveCountdown(0);
+            }
+
+            setError(null);
+            return;
+          }
+
+          setDeviceOnline(true);
+
+          const state = data.state as DeviceState;
+          setDeviceState(state);
+
+          const activeSession = sessionRef.current;
+          const countdown = activeSession
+            ? calculateSessionCountdown(activeSession)
+            : Math.max(0, Number(state.countdown ?? 0));
+
+          countdownRef.current = countdown;
+          setLiveCountdown(countdown);
+          lastTuyaSyncRef.current = Date.now();
+          setError(null);
+        } catch (error) {
+          console.error("FETCH DEVICE ERROR:", error);
+
+          setError(
+            error instanceof Error
+              ? error.message
+              : "Gagal mengambil status device",
+          );
+        } finally {
+          setLoading(false);
+        }
+      })();
+
+      tuyaFetchInFlightRef.current = request;
+
+      try {
+        await request;
+      } finally {
+        if (tuyaFetchInFlightRef.current === request) {
+          tuyaFetchInFlightRef.current = null;
+        }
+      }
+    },
+    [],
+  );
+
+  const scheduleTuyaVerification = useCallback(
+    (deviceId: string, delayMs = TUYA_VERIFY_DELAY_MS) => {
+      if (!deviceId) {
+        return;
+      }
+
+      if (tuyaVerificationTimerRef.current) {
+        clearTimeout(tuyaVerificationTimerRef.current);
+      }
+
+      tuyaVerificationTimerRef.current = setTimeout(() => {
+        tuyaVerificationTimerRef.current = null;
+        void fetchDeviceState(deviceId, { force: true });
+      }, delayMs);
+    },
+    [fetchDeviceState],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (tuyaVerificationTimerRef.current) {
+        clearTimeout(tuyaVerificationTimerRef.current);
+      }
+    };
   }, []);
 
   /* =======================================================
@@ -399,7 +464,7 @@ export default function PSDetailPage({
        */
       await Promise.allSettled([
         restoreActiveSession(rawDeviceId),
-        fetchDeviceState(rawDeviceId),
+        fetchDeviceState(rawDeviceId, { force: true }),
       ]);
     };
 
@@ -559,10 +624,7 @@ export default function PSDetailPage({
               ),
             );
           }
-
-          window.setTimeout(() => {
-            void fetchDeviceState(rawDeviceId);
-          }, 350);
+          scheduleTuyaVerification(rawDeviceId);
         } catch (stopError) {
           console.error("AUTO STOP TUYA ERROR:", stopError);
 
@@ -860,9 +922,7 @@ export default function PSDetailPage({
       );
 
       /* Status Tuya diverifikasi background; tombol tidak perlu menunggu GET. */
-      window.setTimeout(() => {
-        void fetchDeviceState(rawDeviceId);
-      }, 350);
+      scheduleTuyaVerification(rawDeviceId);
     } catch (error) {
       console.error("START SHUTDOWN MODE ERROR:", error);
 
@@ -943,9 +1003,7 @@ export default function PSDetailPage({
         "Shutdown selesai. Monitor telah dimatikan. Kabel power utama sekarang dapat dicabut.",
       );
 
-      window.setTimeout(() => {
-        void fetchDeviceState(rawDeviceId);
-      }, 350);
+      scheduleTuyaVerification(rawDeviceId);
     } catch (error) {
       console.error("FINISH SHUTDOWN MODE ERROR:", error);
 
@@ -1056,14 +1114,7 @@ export default function PSDetailPage({
       };
 
       const verifyTuyaInBackground = () => {
-        void (async () => {
-          try {
-            await new Promise((resolve) => setTimeout(resolve, 350));
-            await fetchDeviceState(rawDeviceId);
-          } catch (verificationError) {
-            console.error("BACKGROUND TUYA VERIFY ERROR:", verificationError);
-          }
-        })();
+        scheduleTuyaVerification(rawDeviceId);
       };
 
       /* ===================================================
