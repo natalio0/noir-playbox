@@ -1,6 +1,7 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "../../../../lib/firebase-admin";
+import { resolveRegisteredDevice } from "../../../../lib/device-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,14 @@ export async function POST(request: NextRequest) {
     const deviceId = String(body?.deviceId || "").trim().toUpperCase();
     if (!type || !deviceId) {
       return NextResponse.json({ success: false, error: "type dan deviceId wajib diisi." }, { status: 400 });
+    }
+
+    const registered = await resolveRegisteredDevice(deviceId);
+    if (!registered || !registered.active) {
+      return NextResponse.json({ success: false, error: "PlayBox tidak ditemukan." }, { status: 404 });
+    }
+    if (registered.cafeId !== cafeId) {
+      return NextResponse.json({ success: false, error: "Device bukan milik cafe operator." }, { status: 403 });
     }
 
     const ref = adminDb.collection("cafes").doc(cafeId).collection("operatorIncidents").doc();

@@ -4,6 +4,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireUserFromRequest } from "@/lib/require-dashboard-user";
 import { resolveRentalPackage } from "@/lib/rental-packages";
 import { createPerfTrace } from "@/lib/perf-trace";
+import { idempotencyDocumentId, normalizeIdempotencyKey } from "@/lib/idempotency";
 import {
   createEmptyDeviceRuntime,
   deviceRuntimeRef,
@@ -142,6 +143,7 @@ export async function POST(request: Request) {
 
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
     const clientPreparingId = String(body.preparingId ?? "").trim();
+    const idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
     const rentalPackage = resolveRentalPackage({
       packageId: body.packageId,
       name: body.packageName,
@@ -166,13 +168,22 @@ export async function POST(request: Request) {
       );
     }
 
-    const sessionRef = adminDb.collection("sessions").doc();
-    const packageRef = sessionRef.collection("packages").doc();
+    const idempotencyId = idempotencyKey
+      ? idempotencyDocumentId("SESSION_START", user.uid, idempotencyKey)
+      : null;
+    const sessionRef = idempotencyId
+      ? adminDb.collection("sessions").doc(`idem-${idempotencyId}`)
+      : adminDb.collection("sessions").doc();
+    const packageRef = idempotencyId
+      ? sessionRef.collection("packages").doc("initial")
+      : sessionRef.collection("packages").doc();
     const runtimeRef = deviceRuntimeRef(deviceId);
 
     let cafeId = "";
     let preparingConverted = false;
     let runtimeHydrated = false;
+    let idempotentReplay = false;
+    let replayStartedAt: Timestamp | null = null;
     const startedAt = Timestamp.now();
 
     await trace.measure("firestoreTransaction", () =>
@@ -207,6 +218,13 @@ export async function POST(request: Request) {
         }
 
         if (runtime.activeSessionId) {
+          if (idempotencyId && runtime.activeSessionId === sessionRef.id) {
+            const existingSession = await transaction.get(sessionRef);
+            if (!existingSession.exists) throw new Error("SESSION_ACTIVE");
+            idempotentReplay = true;
+            replayStartedAt = existingSession.data()?.startedAt ?? null;
+            return;
+          }
           throw new Error("SESSION_ACTIVE");
         }
 
@@ -220,6 +238,10 @@ export async function POST(request: Request) {
           clientPreparingId !== runtime.preparingId
         ) {
           throw new Error("PREPARING_MISMATCH");
+        }
+
+        if (!runtime.preparingId) {
+          throw new Error("PREPARING_REQUIRED");
         }
 
         if (clientPreparingId && !runtime.preparingId) {
@@ -305,18 +327,19 @@ export async function POST(request: Request) {
       }),
     );
 
-    trace.finish("ok", { preparingConverted, runtimeHydrated });
+    trace.finish("ok", { preparingConverted, runtimeHydrated, idempotentReplay });
 
     return Response.json({
       success: true,
       sessionId: sessionRef.id,
       cafeId,
-      preparingConverted,
+      preparingConverted: idempotentReplay ? true : preparingConverted,
+      idempotentReplay,
       session: {
         id: sessionRef.id,
         deviceId,
         status: "ACTIVE",
-        startedAt: startedAt.toDate().toISOString(),
+        startedAt: (replayStartedAt ?? startedAt).toDate().toISOString(),
         endedAt: null,
         totalMinutes: rentalPackage.durationMinutes,
         totalPrice: rentalPackage.price,
@@ -335,6 +358,20 @@ export async function POST(request: Request) {
   } catch (error) {
     trace.finish("error");
     const message = error instanceof Error ? error.message : "Gagal membuat session";
+
+    if (message === "IDEMPOTENCY_KEY_INVALID") {
+      return Response.json(
+        { success: false, error: "idempotencyKey tidak valid" },
+        { status: 400 },
+      );
+    }
+
+    if (message === "PREPARING_REQUIRED") {
+      return Response.json(
+        { success: false, error: "Rental hanya dapat dimulai dari PREPARING aktif" },
+        { status: 409 },
+      );
+    }
 
     if (message === "DEVICE_NOT_FOUND") {
       return Response.json(

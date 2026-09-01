@@ -7,6 +7,7 @@ import { resolveRentalPackage } from "@/lib/rental-packages";
 import { canAccessCafe, canAccessSession } from "@/lib/session-access";
 import { createPerfTrace } from "@/lib/perf-trace";
 import { deviceRuntimeRef, parseDeviceRuntime } from "@/lib/device-runtime";
+import { idempotencyDocumentId, normalizeIdempotencyKey } from "@/lib/idempotency";
 
 export async function POST(
   request: NextRequest,
@@ -27,6 +28,7 @@ export async function POST(
 
     const body = await trace.measure("requestJson", () => request.json());
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
+    const idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
     const rentalPackage = resolveRentalPackage({
       packageId: body.packageId,
       name: body.name,
@@ -45,15 +47,35 @@ export async function POST(
     }
 
     const sessionRef = adminDb.collection("sessions").doc(sessionId);
-    const packageRef = sessionRef.collection("packages").doc();
+    const idempotencyId = idempotencyKey
+      ? idempotencyDocumentId(`SESSION_ADD:${sessionId}`, user.uid, idempotencyKey)
+      : null;
+    const packageRef = idempotencyId
+      ? sessionRef.collection("packages").doc(`idem-${idempotencyId}`)
+      : sessionRef.collection("packages").doc();
     const now = FieldValue.serverTimestamp();
 
     let newTotalMinutes = 0;
     let newTotalPrice = 0;
     let fastPath = false;
+    let idempotentReplay = false;
 
     await trace.measure("firestoreTransaction", () =>
       adminDb.runTransaction(async (transaction) => {
+        if (idempotencyId) {
+          const existingPackage = await transaction.get(packageRef);
+          if (existingPackage.exists) {
+            const sessionSnapshot = await transaction.get(sessionRef);
+            if (!sessionSnapshot.exists) throw new Error("SESSION_NOT_FOUND");
+            const sessionData = sessionSnapshot.data()!;
+            if (!canAccessSession(user, sessionData)) throw new Error("SESSION_FORBIDDEN");
+            newTotalMinutes = Number(sessionData.totalMinutes ?? 0);
+            newTotalPrice = Number(sessionData.totalPrice ?? 0);
+            idempotentReplay = true;
+            return;
+          }
+        }
+
         /* =====================================================
            FAST PATH: runtime menjadi lock bersama ADD TIME/STOP.
         ===================================================== */
@@ -177,12 +199,13 @@ export async function POST(
       }),
     );
 
-    trace.finish("ok", { fastPath });
+    trace.finish("ok", { fastPath, idempotentReplay });
 
     return NextResponse.json({
       success: true,
       sessionId,
       packageId: packageRef.id,
+      idempotentReplay,
       package: {
         id: packageRef.id,
         packageId: rentalPackage.id,
@@ -201,6 +224,13 @@ export async function POST(
   } catch (error) {
     trace.finish("error");
     const message = error instanceof Error ? error.message : "Gagal menyimpan package";
+
+    if (message === "IDEMPOTENCY_KEY_INVALID") {
+      return NextResponse.json(
+        { success: false, error: "idempotencyKey tidak valid" },
+        { status: 400 },
+      );
+    }
 
     if (message === "UNAUTHORIZED") {
       return NextResponse.json(

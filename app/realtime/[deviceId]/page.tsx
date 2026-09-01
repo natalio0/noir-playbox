@@ -145,6 +145,19 @@ export default function PSDetailPage({
   const expiryStopRef = useRef(false);
 
   const countdownRef = useRef(0);
+  const idempotencyKeysRef = useRef<Record<string, string>>({});
+
+  const getIdempotencyKey = useCallback((scope: string) => {
+    const existing = idempotencyKeysRef.current[scope];
+    if (existing) return existing;
+    const key = crypto.randomUUID();
+    idempotencyKeysRef.current[scope] = key;
+    return key;
+  }, []);
+
+  const clearIdempotencyKey = useCallback((scope: string) => {
+    delete idempotencyKeysRef.current[scope];
+  }, []);
 
   const lastTuyaSyncRef = useRef<number>(0);
 
@@ -837,6 +850,8 @@ export default function PSDetailPage({
 
   async function createSession(pkg: (typeof PACKAGES)[number]) {
     const user = auth.currentUser;
+    const scope = `START:${rawDeviceId}:${preparing?.id ?? ""}:${pkg.id}`;
+    const idempotencyKey = getIdempotencyKey(scope);
 
     if (!user) {
       throw new Error("User belum login");
@@ -853,6 +868,7 @@ export default function PSDetailPage({
       body: JSON.stringify({
         deviceId: rawDeviceId,
         preparingId: preparing?.id ?? null,
+        idempotencyKey,
         packageId: pkg.id,
         durationMinutes: pkg.durationMinutes,
         packageName: pkg.name,
@@ -867,6 +883,7 @@ export default function PSDetailPage({
       throw new Error(data.error || "Gagal membuat session");
     }
 
+    clearIdempotencyKey(scope);
     return {
       session: data.session as Session,
       package: (data.package ?? null) as SessionPackage | null,
@@ -883,6 +900,8 @@ export default function PSDetailPage({
     pkg: (typeof PACKAGES)[number],
   ) {
     const user = auth.currentUser;
+    const scope = `ADD:${sessionId}:${pkg.id}`;
+    const idempotencyKey = getIdempotencyKey(scope);
 
     if (!user) {
       throw new Error("User belum login");
@@ -898,6 +917,7 @@ export default function PSDetailPage({
       },
       body: JSON.stringify({
         deviceId: rawDeviceId,
+        idempotencyKey,
         packageId: pkg.id,
         name: pkg.name,
         durationMinutes: pkg.durationMinutes,
@@ -912,6 +932,7 @@ export default function PSDetailPage({
       throw new Error(data.error || "Gagal menyimpan package");
     }
 
+    clearIdempotencyKey(scope);
     return {
       package: data.package as SessionPackage,
       totalMinutes: Number(data.session.totalMinutes ?? 0),
@@ -1090,6 +1111,40 @@ export default function PSDetailPage({
     }
   }
 
+  async function verifyTuyaSwitch(expectedOn: boolean) {
+    const user = auth.currentUser;
+    if (!user || !rawDeviceId) throw new Error("User/device belum siap");
+
+    const idToken = await user.getIdToken();
+    let lastMessage = "Status hardware belum terverifikasi";
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      }
+
+      const response = await fetch(`/api/tuya/device/${rawDeviceId}`, {
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      const data = await response.json();
+
+      if (response.ok && data.success && data.online === true && data.state) {
+        const actualOn = data.state.switch === true;
+        if (actualOn === expectedOn) return data.state as DeviceState;
+        lastMessage = expectedOn
+          ? "Smart plug masih terdeteksi OFF"
+          : "Smart plug masih terdeteksi ON";
+      } else if (data.online === false) {
+        lastMessage = "Device offline; kondisi relay tidak dapat diverifikasi";
+      } else {
+        lastMessage = String(data.error ?? lastMessage);
+      }
+    }
+
+    throw new Error(lastMessage);
+  }
+
   async function finishOperationalShutdownMode() {
     if (!rawDeviceId || shutdownMode?.status !== "SHUTDOWN_ACTIVE") {
       return;
@@ -1132,6 +1187,10 @@ export default function PSDetailPage({
       if (!response.ok || !data.success) {
         throw new Error(data.error || "Gagal mematikan monitor");
       }
+
+      // STOP command sukses belum berarti relay sudah benar-benar OFF.
+      // Wajib online + OFF sebelum runtime dikembalikan ke READY.
+      await verifyTuyaSwitch(false);
 
       /*
        * Audit shutdown ditutup hanya setelah
@@ -1385,92 +1444,48 @@ export default function PSDetailPage({
       }
 
       /* ===================================================
-         POWER ON → PREPARING (PARALLEL + FAIL SAFE)
+         POWER ON → PREPARING (HARDWARE FIRST)
 
-         Tuya ON dan pembuatan PREPARING berjalan paralel. Ini menghapus
-         kesan lambat karena sebelumnya dua request ditunggu serial.
-
-         Safety:
-         - Tuya sukses, PREPARING gagal  -> monitor di-STOP kembali.
-         - PREPARING sukses, Tuya gagal  -> PREPARING ditutup tanpa billing.
-         Jadi tidak ada monitor ON tanpa audit PREPARING.
+         Safety invariant v3.9:
+         command ON -> verify online + ON -> baru PREPARING dibuat.
+         Website kini sama dengan Android dan tidak pernah mencatat
+         PREPARING ketika smart plug sebenarnya offline.
       =================================================== */
 
       if (action === "ON" && !sessionRef.current) {
-        /*
-         * Optimistic UI: operator langsung melihat state PREPARING sementara
-         * request Tuya + Firebase berjalan. Tombol paket tetap disabled karena
-         * controlLoading=true sampai keduanya sukses.
-         */
-        const optimisticPreparing: PreparingSession = {
-          id: "__starting__",
-          deviceId: rawDeviceId.toUpperCase(),
-          status: "PREPARING",
-          startedAt: new Date().toISOString(),
-          activatedAt: null,
-          endedAt: null,
-          billingSessionId: null,
-          operatorUid: user.uid,
-        };
-
-        setPreparing(optimisticPreparing);
         setDeviceOnline(true);
         setDeviceState((current) =>
           current
             ? { ...current, switch: true, countdown: 0 }
-            : {
-                switch: true,
-                countdown: 0,
-                power: 0,
-                current: 0,
-                voltage: 0,
-              },
+            : { switch: true, countdown: 0, power: 0, current: 0, voltage: 0 },
         );
 
-        const [tuyaResult, preparingResult] = await Promise.allSettled([
-          sendTuyaCommand("ON"),
-          startPreparingSession(rawDeviceId),
-        ]);
+        try {
+          await sendTuyaCommand("ON");
+          const verifiedState = await verifyTuyaSwitch(true);
+          setDeviceOnline(true);
+          setDeviceState(verifiedState);
 
-        if (tuyaResult.status === "rejected") {
+          const activePreparing = await startPreparingSession(rawDeviceId);
+          setPreparing(activePreparing);
+          showNotification("success", "PREPARING aktif. Hardware sudah online dan terverifikasi ON.");
+          return;
+        } catch (prepareError) {
           setPreparing(null);
+          setDeviceOnline(false);
           setDeviceState((current) =>
             current ? { ...current, switch: false, countdown: 0 } : current,
           );
 
-          if (preparingResult.status === "fulfilled") {
-            try {
-              await endPreparingWithoutBilling(preparingResult.value.id);
-            } catch (cleanupError) {
-              console.error("PREPARING CLEANUP AFTER TUYA FAILURE:", cleanupError);
-            }
-          }
-
-          throw tuyaResult.reason;
-        }
-
-        if (preparingResult.status === "rejected") {
-          setPreparing(null);
-
+          // Bila backend PREPARING gagal setelah hardware ON, rollback best effort.
           try {
             await sendTuyaCommand("STOP");
           } catch (rollbackError) {
-            console.error("TUYA ROLLBACK AFTER PREPARING FAILURE:", rollbackError);
+            console.error("PREPARING HARDWARE ROLLBACK ERROR:", rollbackError);
           }
 
-          setDeviceState((current) =>
-            current ? { ...current, switch: false, countdown: 0 } : current,
-          );
-
-          throw preparingResult.reason;
+          throw prepareError;
         }
-
-        const activePreparing = preparingResult.value;
-        setPreparing(activePreparing);
-
-        showNotification("success", "PREPARING aktif. Pilih paket saat unit siap.");
-        verifyTuyaInBackground();
-        return;
       }
 
       /* ===================================================
