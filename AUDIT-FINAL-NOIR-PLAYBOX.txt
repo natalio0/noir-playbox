@@ -1,0 +1,228 @@
+NOIR PLAYBOX — FULL AUDIT FINAL
+===============================
+Basis audit: ZIP terbaru yang di-upload user.
+Target: performa, efisiensi Vercel/Firestore/Tuya, billing integrity, role/cafe isolation, production hygiene.
+
+RINGKASAN
+=========
+Kondisi project sudah jauh lebih baik dibanding versi awal:
+- realtime overview sudah batch
+- smart polling sudah pause saat tab hidden
+- request overlap/cooldown sudah ada
+- auth profile sudah dedupe/cache
+- admin alerts minimal 30 detik
+- analytics minimal 60 detik
+- Firebase Admin Vercel sudah memakai env
+- vercel.json tidak lagi memuat cron 5 menit yang ditolak Hobby
+
+PATCH FINAL INI MENANGANI TEMUAN PRIORITAS TINGGI
+=================================================
+
+1. BILLING API SEBELUMNYA BELUM SERVER-AUTHORITATIVE
+---------------------------------------------------
+Temuan:
+- create session menerima duration/price dari request client
+- add package menerima duration/price dari request client
+
+Risiko:
+request manual bisa mengubah harga/durasi tanpa memakai paket resmi.
+
+Fix:
+- catalog paket dipusatkan di lib/rental-packages.ts
+- server menentukan duration + price dari packageId
+- payload lama hanya diterima jika nama/durasi/harga persis cocok katalog resmi
+
+Paket resmi tetap:
+1h  = Rp12.000
+2h  = Rp22.000
+3h  = Rp30.000
+5h  = Rp45.000
+10h = Rp80.000
+
+
+2. COMPLETE SESSION DAN ADD PACKAGE SEBELUMNYA TIDAK MEMVERIFIKASI AUTH
+---------------------------------------------------------------------
+Fix:
+- kedua route sekarang wajib Firebase Bearer token
+- admin dapat akses semua cafe
+- operational hanya session cafe miliknya
+
+
+3. RACE CONDITION BILLING
+-------------------------
+Temuan:
+ADD TIME dan COMPLETE bisa terjadi berdekatan dan update total secara terpisah.
+
+Fix:
+- add package memakai Firestore transaction
+- complete session memakai Firestore transaction
+- package query saat complete ikut berada dalam transaction
+- create session memeriksa ACTIVE session dalam transaction
+
+Tujuan:
+- mengurangi duplicate ACTIVE session
+- mencegah lost update totalMinutes / totalPrice
+- ADD TIME dan COMPLETE tidak saling menimpa billing
+
+
+4. PREPARING / SHUTDOWN CAFE ISOLATION
+--------------------------------------
+Temuan:
+sejumlah lifecycle endpoint sebelumnya hanya memastikan user login,
+tetapi belum memastikan preparingId/shutdownId/deviceId milik cafe user.
+
+Fix:
+- START PREPARING resolve device registry dan cafe sebenarnya
+- ACTIVE PREPARING cek akses device
+- CONVERT PREPARING cek cafe + billing session + device relation
+- END PREPARING cek cafe
+- START SHUTDOWN cek device + cafe + source session
+- ACTIVE SHUTDOWN cek device
+- COMPLETE SHUTDOWN cek cafe
+
+Admin tetap dapat mengelola semua cafe.
+Operational tetap hanya cafe miliknya.
+
+
+5. INVALID FIREBASE USER PROFILE
+--------------------------------
+require-dashboard-user sekarang tidak hanya menerima Firebase token valid.
+users/{uid} juga wajib ada dan role wajib admin atau operational.
+
+Ini mencegah authenticated Firebase account tanpa profile dashboard
+masuk ke route yang hanya melakukan pengecekan role secara parsial.
+
+
+6. FIRESTORE READ REALTIME OVERVIEW
+-----------------------------------
+Temuan:
+setiap /api/realtime/overview sebelumnya membaca device registry + dokumen cafe,
+padahal halaman realtime tidak memakai cafeName.
+
+Fix:
+- realtime overview tidak membaca cafe name
+- registry list cache server 30 detik
+- cache di-invalidasi setelah admin menambahkan device pada instance yang sama
+
+Efek:
+Firestore read untuk registry berkurang terutama jika dashboard dibiarkan terbuka.
+
+
+7. TUYA DUPLICATE MONITORING READ
+---------------------------------
+Ditambahkan cache pendek 3 detik khusus GET status monitoring.
+
+- overlapping request untuk device sama dapat memakai hasil/in-flight request yang sama
+- control ON/OFF/TIMER tidak memakai cache ini
+- tidak mengubah billing source-of-truth
+
+
+8. HISTORY FIRESTORE
+--------------------
+Temuan:
+History UI menampilkan maksimal 150 session tetapi API sebelumnya dapat membaca
+seluruh session sejak 2020 lalu slice 150.
+
+Fix:
+period=history + all cafe langsung:
+orderBy startedAt desc + limit 150
+
+
+9. PRODUCTION TEST SURFACE
+-------------------------
+Fix:
+- /test-firebase => 404 pada production
+- /admin/watchdog-test => 404 pada production
+- /api/tuya/state legacy => 404 pada production
+- /api/tuya/test legacy => 404 pada production
+- /api/setup/seed => 404 production kecuali ALLOW_PRODUCTION_SEED=true
+
+Dev test endpoint /api/dev/test-* sebelumnya sudah memiliki production guard dan tetap dipertahankan.
+
+
+10. DEBUG / LOG HYGIENE
+-----------------------
+Menghapus log browser RoleGuard/login yang tidak diperlukan dan log PII debug
+di helper server-auth lama.
+
+
+YANG SUDAH DIPERIKSA
+====================
+- Tidak ditemukan .env, service-account JSON, PEM, atau file bernama env di ZIP terbaru.
+- Semua API route sekarang memiliki auth/secret guard atau production guard.
+- 89 file TS/TSX lolos syntax transpile check internal.
+
+PENTING:
+Full lint/type/build tetap harus dijalankan di Mac user karena environment audit
+ini tidak memiliki instalasi node_modules yang lengkap.
+
+
+TEMUAN YANG BELUM SAYA UBAH OTOMATIS
+====================================
+A. Firestore Security Rules tidak ada di ZIP.
+   Karena Header / dashboard masih memiliki beberapa client-side Firestore read,
+   rules wajib diaudit sebelum menyatakan data isolation operational 100% aman.
+
+B. app/api/admin/cafes/[cafeId] masih membaca seluruh histori session cafe ketika
+   detail cafe dibuka. Ini tidak polling terus-menerus, jadi belum separah overview,
+   tetapi sebaiknya dipaginasi / dibatasi period ketika histori sudah besar.
+
+C. Ada beberapa file legacy/dead-code:
+   - components/dashboard/UsageChart.tsx (dashboard utama punya implementasi inline)
+   - components/dashboard/RecentActivity.tsx
+   - components/providers/RoleGuard.tsx
+   - lib/sessions.ts dipakai test Firebase legacy
+   - lib/tuya.ts dipakai route Tuya legacy
+   - scripts/tuya-mqtt.ts kosong
+   Saya tidak menghapus otomatis supaya tidak merusak workflow yang mungkin masih dipakai.
+
+D. Dependency mqtt terlihat tidak dipakai oleh runtime dan script tuya-mqtt.ts kosong.
+   Bisa dihapus kemudian untuk mengurangi dependency/install time, tetapi package-lock
+   sebaiknya diubah lewat npm uninstall, bukan diedit manual.
+
+E. Watchdog auto-run pada Vercel Hobby tetap membutuhkan external scheduler.
+   vercel.json kosong memang membuat deploy Hobby aman, tetapi endpoint watchdog tidak
+   akan memanggil dirinya sendiri.
+
+
+INSTALL PATCH
+=============
+unzip -o ~/Downloads/noir-playbox-final-audit-patch-v1.zip -d .
+rm -rf .next
+npm run lint
+npx tsc --noEmit
+npm run build
+
+JANGAN PUSH JIKA SALAH SATU TEST GAGAL.
+
+Setelah hijau:
+git status --short
+
+Pastikan tidak ada:
+- env
+- .env.local
+- *firebase-adminsdk*.json
+
+Lalu:
+git add app components lib AUDIT-FINAL-NOIR-PLAYBOX.txt
+git commit -m "harden and optimize Noir Playbox production"
+git push origin main
+
+
+SMOKE TEST SETELAH VERCEL READY
+===============================
+1. Login admin
+2. Login operational
+3. /realtime overview status PS01 normal
+4. POWER ON -> PREPARING
+5. Pilih paket -> ACTIVE billing
+6. ADD TIME satu kali
+7. Complete rental
+8. SHUTDOWN mode start -> complete
+9. Cek History dan Monthly Report
+10. Cek /api/realtime/overview => 200
+11. Pastikan /test-firebase => 404 di production
+12. Pastikan /admin/watchdog-test => 404 di production
+
+Untuk test transaksi rental gunakan satu unit test dan jangan lakukan ADD TIME / COMPLETE
+secara bersamaan dari dua browser production sampai smoke test normal selesai.

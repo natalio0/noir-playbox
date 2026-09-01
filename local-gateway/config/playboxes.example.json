@@ -1,0 +1,15 @@
+{
+  "gatewayId": "black-lounge-gateway-01",
+  "listenHost": "127.0.0.1",
+  "listenPort": 8787,
+  "apiToken": "CHANGE_ME_LONG_RANDOM_TOKEN",
+  "devicesFile": "../devices.json",
+  "playboxes": {
+    "PS01": {
+      "tuyaDeviceId": "PASTE_DEVICE_ID_PS01",
+      "ip": "Auto",
+      "version": null,
+      "switchDps": 1
+    }
+  }
+}

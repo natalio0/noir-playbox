@@ -11,20 +11,13 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 
 function getServiceAccountFromEnv(): ServiceAccount | null {
-  const projectId =
-    process.env.FIREBASE_ADMIN_PROJECT_ID?.trim();
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID?.trim();
 
-  const clientEmail =
-    process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim();
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim();
 
-  const privateKeyRaw =
-    process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+  const privateKeyRaw = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
 
-  if (
-    !projectId ||
-    !clientEmail ||
-    !privateKeyRaw
-  ) {
+  if (!projectId || !clientEmail || !privateKeyRaw) {
     return null;
   }
 
@@ -34,16 +27,11 @@ function getServiceAccountFromEnv(): ServiceAccount | null {
    *
    * replace(/\\n/g, "\n") mengembalikannya ke format PEM.
    */
-  const privateKey =
-    privateKeyRaw.replace(/\\n/g, "\n");
+  const privateKey = privateKeyRaw.replace(/\\n/g, "\n");
 
   if (
-    !privateKey.includes(
-      "-----BEGIN PRIVATE KEY-----",
-    ) ||
-    !privateKey.includes(
-      "-----END PRIVATE KEY-----",
-    )
+    !privateKey.includes("-----BEGIN PRIVATE KEY-----") ||
+    !privateKey.includes("-----END PRIVATE KEY-----")
   ) {
     throw new Error(
       "FIREBASE_ADMIN_PRIVATE_KEY tidak valid. Pastikan isi private_key Firebase service account lengkap.",
@@ -58,8 +46,7 @@ function getServiceAccountFromEnv(): ServiceAccount | null {
 }
 
 function getServiceAccountFromFile(): ServiceAccount | null {
-  const credentialsPath =
-    process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
   if (!credentialsPath) {
     return null;
@@ -72,10 +59,7 @@ function getServiceAccountFromFile(): ServiceAccount | null {
   }
 
   const serviceAccount = JSON.parse(
-    fs.readFileSync(
-      credentialsPath,
-      "utf8",
-    ),
+    fs.readFileSync(credentialsPath, "utf8"),
   ) as ServiceAccount;
 
   return serviceAccount;
@@ -96,8 +80,7 @@ function getFirebaseAdminApp() {
    *    -> fallback untuk development lokal.
    */
   const serviceAccount =
-    getServiceAccountFromEnv() ??
-    getServiceAccountFromFile();
+    getServiceAccountFromEnv() ?? getServiceAccountFromFile();
 
   if (!serviceAccount) {
     throw new Error(
@@ -120,13 +103,10 @@ function getFirebaseAdminApp() {
   });
 }
 
-const adminApp =
-  getFirebaseAdminApp();
+const adminApp = getFirebaseAdminApp();
 
-export const adminDb =
-  getFirestore(adminApp);
+export const adminDb = getFirestore(adminApp);
 
-export const adminAuth =
-  getAuth(adminApp);
+export const adminAuth = getAuth(adminApp);
 
 export default adminApp;
