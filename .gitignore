@@ -51,3 +51,10 @@ next-env.d.ts
 # Local patch/test archives
 *.zip
 env
+
+.env
+.env.local
+.env.production.local
+serviceAccount*.json
+firebase-admin*.json
+.next/
