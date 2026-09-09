@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
     const logicalDeviceId = String(body?.logicalDeviceId || "").trim().toUpperCase();
     const protocolVersion = String(body?.protocolVersion || "").trim();
     const ipAddress = String(body?.ipAddress || "").trim();
+    const forceRefresh = body?.forceRefresh === true;
 
     if (!cafeId) return error("cafeId wajib diisi.");
     if (!tuyaDeviceId) return error("tuyaDeviceId wajib diisi.");
@@ -55,7 +56,7 @@ export async function POST(request: NextRequest) {
     const existing = await registryRef.get();
     const existingData = existing.data() || {};
     const existingKey = String(existingData.localKey || existingData.local_key || "").trim();
-    if (existingKey) {
+    if (existingKey && !forceRefresh) {
       return NextResponse.json({
         success: true,
         source: "firestore",
@@ -77,11 +78,11 @@ export async function POST(request: NextRequest) {
       tuyaDeviceId,
       localKey: detail.local_key,
       name: detail.name || `Tuya ${tuyaDeviceId.slice(-6)}`,
-      logicalDeviceId: logicalDeviceId || null,
-      protocolVersion: protocolVersion || null,
-      switchDps: 1,
-      lastKnownIp: ipAddress || null,
-      source: "tuya-cloud",
+      logicalDeviceId: logicalDeviceId || existingData.logicalDeviceId || null,
+      protocolVersion: protocolVersion || existingData.protocolVersion || null,
+      switchDps: Number(existingData.switchDps || 1),
+      lastKnownIp: ipAddress || existingData.lastKnownIp || null,
+      source: forceRefresh ? "tuya-cloud-refresh" : "tuya-cloud",
       syncedByUid: decoded.uid,
       updatedAt: FieldValue.serverTimestamp(),
     };
@@ -90,15 +91,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      source: "tuya-cloud",
-      device: {
-        tuyaDeviceId,
-        localKey: detail.local_key,
-        logicalDeviceId: logicalDeviceId || null,
-        name: detail.name || `Tuya ${tuyaDeviceId.slice(-6)}`,
-        protocolVersion: protocolVersion || null,
-        switchDps: 1,
-      },
+      source: forceRefresh ? "tuya-cloud-refresh" : "tuya-cloud",
+      device: registryData,
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
