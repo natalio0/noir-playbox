@@ -34,7 +34,7 @@ export async function POST(request: Request) {
       orderId,
       amount: rentalPackage.price,
       itemId: rentalPackage.id,
-      itemName: `Noir Playbox ${rentalPackage.label}`,
+      itemName: `Kagoengan Studio Playbox ${rentalPackage.label}`,
     });
 
     await adminDb.collection("payment_orders").doc(orderId).set({

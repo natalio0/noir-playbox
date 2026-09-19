@@ -5,15 +5,20 @@ export type PaymentPackage = {
   price: number;
 };
 
-// Keep this catalog aligned with Android RentalPackage values.
-// Server-side validation prevents a modified client from changing payment amount.
-export const PAYMENT_PACKAGES: readonly PaymentPackage[] = [
-  { id: "1h", label: "1 Jam", durationMinutes: 60, price: 12_000 },
-  { id: "2h", label: "2 Jam", durationMinutes: 120, price: 22_000 },
-  { id: "3h", label: "3 Jam", durationMinutes: 180, price: 30_000 },
-  { id: "5h", label: "5 Jam", durationMinutes: 300, price: 45_000 },
-  { id: "10h", label: "10 Jam", durationMinutes: 600, price: 80_000 },
-] as const;
+// Kagoengan Studio Playbox: tarif linear Rp12.000 per jam.
+// Server-side validation prevents a modified client from changing the amount.
+export const PAYMENT_PACKAGES: readonly PaymentPackage[] = Array.from(
+  { length: 10 },
+  (_, index) => {
+    const hours = index + 1;
+    return {
+      id: `${hours}h`,
+      label: `${hours} Jam`,
+      durationMinutes: hours * 60,
+      price: hours * 12_000,
+    };
+  },
+);
 
 export function getPaymentPackage(packageId: string): PaymentPackage | null {
   const id = packageId.trim();

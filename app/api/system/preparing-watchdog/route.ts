@@ -95,7 +95,9 @@ function authorizeCron(request: Request) {
   }
 
   const supplied =
-    readBearerToken(request);
+    readBearerToken(request) ??
+    request.headers.get("x-cron-secret")?.trim() ??
+    null;
 
   if (
     !supplied ||
