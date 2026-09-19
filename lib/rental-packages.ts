@@ -3,36 +3,71 @@ export const RENTAL_PACKAGES = [
     id: "1h",
     name: "1 Jam",
     durationMinutes: 60,
-    price: 12000,
+    price: 12_000,
     saving: 0,
   },
   {
     id: "2h",
     name: "2 Jam",
     durationMinutes: 120,
-    price: 22000,
-    saving: 2000,
+    price: 24_000,
+    saving: 0,
   },
   {
     id: "3h",
     name: "3 Jam",
     durationMinutes: 180,
-    price: 30000,
-    saving: 6000,
+    price: 36_000,
+    saving: 0,
+  },
+  {
+    id: "4h",
+    name: "4 Jam",
+    durationMinutes: 240,
+    price: 48_000,
+    saving: 0,
   },
   {
     id: "5h",
     name: "5 Jam",
     durationMinutes: 300,
-    price: 45000,
-    saving: 15000,
+    price: 60_000,
+    saving: 0,
+  },
+  {
+    id: "6h",
+    name: "6 Jam",
+    durationMinutes: 360,
+    price: 72_000,
+    saving: 0,
+  },
+  {
+    id: "7h",
+    name: "7 Jam",
+    durationMinutes: 420,
+    price: 84_000,
+    saving: 0,
+  },
+  {
+    id: "8h",
+    name: "8 Jam",
+    durationMinutes: 480,
+    price: 96_000,
+    saving: 0,
+  },
+  {
+    id: "9h",
+    name: "9 Jam",
+    durationMinutes: 540,
+    price: 108_000,
+    saving: 0,
   },
   {
     id: "10h",
     name: "10 Jam",
     durationMinutes: 600,
-    price: 80000,
-    saving: 40000,
+    price: 120_000,
+    saving: 0,
   },
 ] as const;
 
@@ -50,7 +85,6 @@ export function resolveRentalPackage(input: {
     return RENTAL_PACKAGES.find((item) => item.id === packageId) ?? null;
   }
 
-  // Backward-compatible fallback for a client still sending the old payload.
   const name = String(input.name ?? "").trim();
   const durationMinutes = Number(input.durationMinutes ?? NaN);
   const price = Number(input.price ?? NaN);
