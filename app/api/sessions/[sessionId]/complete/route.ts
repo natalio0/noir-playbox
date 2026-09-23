@@ -54,6 +54,9 @@ export async function PATCH(
       request.json().catch(() => ({})),
     );
     const deviceId = String(body.deviceId ?? "").trim().toUpperCase();
+    // Only the Android auto-expiry worker sends this flag. Manual completion
+    // remains available to an operator before the rental end time.
+    const autoExpire = body.autoExpire === true;
 
     if (!sessionId) {
       return NextResponse.json(
@@ -92,6 +95,18 @@ export async function PATCH(
               throw new Error("SESSION_FORBIDDEN");
             }
 
+            if (autoExpire) {
+              const startedAtMs = runtime.sessionStartedAt?.toMillis?.() ?? 0;
+              const endAtMs = startedAtMs + runtime.sessionTotalMinutes * 60_000;
+              if (
+                startedAtMs <= 0 ||
+                runtime.sessionTotalMinutes <= 0 ||
+                now.toMillis() < endAtMs
+              ) {
+                throw new Error("AUTO_EXPIRY_NOT_DUE");
+              }
+            }
+
             const shutdownData = {
               deviceId,
               cafeId: runtime.cafeId,
@@ -104,6 +119,7 @@ export async function PATCH(
               operatorEmail: user.email ?? null,
               createdAt: now,
               updatedAt: now,
+              autoExpired: autoExpire,
             };
 
             transaction.update(sessionRef, {
@@ -223,6 +239,14 @@ export async function PATCH(
           ? shutdownSnapshot.data() ?? null
           : null;
 
+        if (autoExpire && session.status === "ACTIVE") {
+          const startedAtMs = session.startedAt?.toMillis?.() ?? 0;
+          const endAtMs = startedAtMs + totalMinutes * 60_000;
+          if (startedAtMs <= 0 || totalMinutes <= 0 || now.toMillis() < endAtMs) {
+            throw new Error("AUTO_EXPIRY_NOT_DUE");
+          }
+        }
+
         if (session.status === "ACTIVE") {
           transaction.update(sessionRef, {
             status: "COMPLETED",
@@ -246,6 +270,7 @@ export async function PATCH(
             operatorEmail: user.email ?? null,
             createdAt: now,
             updatedAt: now,
+            autoExpired: autoExpire,
           };
 
           transaction.set(shutdownRef, shutdownData);
@@ -355,6 +380,16 @@ export async function PATCH(
         {
           success: false,
           error: "Runtime PlayBox sudah menunjuk ke rental lain. Refresh halaman.",
+        },
+        { status: 409 },
+      );
+    }
+
+    if (message === "AUTO_EXPIRY_NOT_DUE") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Waktu rental belum habis. Shutdown Pending tidak dibuat.",
         },
         { status: 409 },
       );
