@@ -122,7 +122,8 @@ export async function PATCH(
 
     const auditRef = adminDb.collection("audit_logs").doc();
     batch.set(auditRef, {
-      type: "SHUTDOWN_MODE_COMPLETED",
+      type: data.isTest === true ? "SHUTDOWN_TEST_COMPLETED" : "SHUTDOWN_MODE_COMPLETED",
+      isTest: data.isTest === true,
       deviceId: data.deviceId ?? null,
       cafeId: data.cafeId ?? null,
       shutdownId,

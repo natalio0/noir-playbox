@@ -187,6 +187,9 @@ export async function POST(request: Request) {
             .collection("shutdown_sessions")
             .doc(runtime.shutdownId);
 
+          const pendingShutdownSnapshot = await transaction.get(shutdownRef);
+          const isTest = pendingShutdownSnapshot.data()?.isTest === true;
+
           transaction.update(shutdownRef, {
             status: "SHUTDOWN_ACTIVE",
             startedAt: now,
@@ -211,7 +214,8 @@ export async function POST(request: Request) {
           );
 
           transaction.set(auditRef, {
-            type: "SHUTDOWN_MODE_STARTED",
+            type: isTest ? "SHUTDOWN_TEST_STARTED" : "SHUTDOWN_MODE_STARTED",
+            isTest,
             deviceId,
             cafeId: registered.cafeId,
             shutdownId: runtime.shutdownId,
